@@ -1,0 +1,17 @@
+SRRF24	KEYWORD1
+begin	KEYWORD2
+setFixedAddress	KEYWORD2
+setSelfAddress	KEYWORD2
+setSelfAddress	KEYWORD2
+setDataRate	KEYWORD2
+setPALevel	KEYWORD2
+setARD	KEYWORD2
+setARC	KEYWORD2
+setChannel	KEYWORD2
+setAutoAck	KEYWORD2
+setDynamicPayloads	KEYWORD2
+write	KEYWORD2
+available	KEYWORD2
+read	KEYWORD2
+powerDown	KEYWORD2
+
