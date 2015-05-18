@@ -1,9 +1,29 @@
 ###NRF24L01+ driver
-###Flock and Peep protocols
 #####description and API documentation
 
 #####tom jennings
-#####10 may 2015
+#####04 march 2015
+
+######REVISION HISTORY
+
+29 mar 2015 corrections to API (pins are specified
+in begin). please see the RADIO ADDRESSING section.
+
+20 mar 2015 renamed directories, files and classes
+to accommodate the new consistent naming scheme.
+
+04 mar 2015 version 3: expanded radio addressing
+(and again changed the API) to accomodate
+both fixed (5-byte pipe address for TX, RX) and 
+self-addressing (the scheme introduced in version 2).
+
+27 feb 2015 version 2: fully automated (invisible) 
+radio addressing.  the 'pipe' addressing scheme of 
+the Nordic chip has been automated and effectively 
+disappeared. addresses can be set via the API 
+if desired.
+
+24 feb 2015 first release.
 
 ####DESCRIPTION
 

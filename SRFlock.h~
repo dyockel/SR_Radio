@@ -15,6 +15,10 @@
  TODO:
 
 
+  17 may 2015  badChan[] table too small! moved xor() stuff
+               into SRResources.
+  10 may 2015  added setPromiscuous(). nasty bug -- ackPacket()
+               writes in pxBuff, called before copyN.
   05 may 2015  implemented CRC-base duplicate detection, and 
                simple double-write in write() to increase delivery
 	       probability. the latter needs to be true retry for
@@ -89,6 +93,7 @@ class SRFlock {
 private:
 	SRRF24 radio;
 	SRTimer T;
+	SRCRC CRC;
 	SRLED RFLED;				// our RF activity status LED
 	uint8_t LEDpin;				// optional
 
@@ -102,13 +107,14 @@ private:
 	uint8_t * txBuff;			// tx buffer, in userland 
 	uint8_t * rxBuff;			// rx buffer, in userland 
 	uint8_t pxBuff[PACKETSIZE];		// protocol packet buffer
-	boolean connectState;			// true if connected
+	bool connectState;			// true if connected
+	bool promisc;				// true if we'll receive any packet
 	unsigned rxTimeout;			// rx timeout time, decisec
 	uint8_t rxPower;			// receive power indication
-	boolean dynamicChannelMapping;		// enables channel mapping
+	bool dynamicChannelMapping;		// enables channel mapping
 	uint8_t ackBalance;			// channel error logic
 	uint8_t chanThresh;			//
-	uint8_t badChan[(MAXCHANNEL+1)/8];	// bad channels, 0..127, bitmap
+	uint8_t badChan[16];			// bad channels, 0..127, bitmap
 	uint8_t prevCRC;			// CRC8 of the previous payload packet
 	char seqNumber;				// transmit packet sequence
 
@@ -127,8 +133,8 @@ private:
 
 protected:
 	void blink (uint8_t n);
-	void ackPacket (char id, boolean req);
-	int getPacket (boolean allOK);
+	void ackPacket (char id, bool req);
+	int getPacket (bool broadcast, bool promisc);
 	void copyN (uint8_t * d, uint8_t * s, uint8_t n);
 	uint8_t newChan (uint8_t badChan);
 	uint8_t dupCheck (uint8_t r);
@@ -156,12 +162,14 @@ public:
 	void setRxAR (uint8_t sec);
 	void setRxAT (uint8_t sec);
 	void setChanThresh (uint8_t t);
+	void setPromiscuous(bool yup);
 
-	boolean connected();
+	bool connected();
 	uint8_t getChannel();
 	uint8_t getRxPower();
+	uint8_t readRegister (uint8_t r);
 
-	boolean messageDispatcher (char c, unsigned nnn);
+	bool messageDispatcher (char c, unsigned nnn);
 
 	// base to flock only
 	//
@@ -186,6 +194,7 @@ int SRFlock::begin (uint8_t _ce_pin, uint8_t _csn_pin, 	// radio chip pins
 	rxBuff= rxb;					// pointers to buffers
 	txBuff= txb;
 	connectState= false;
+	promisc= false;
 
 	uint8_t r= radio.begin (_ce_pin, _csn_pin); 
 	radio.setAutoAck (false);
@@ -227,10 +236,10 @@ int SRFlock::flockToBase () {
 	if (LEDpin) RFLED.LED();			// run LEDs if configured
 
 	switch (state) {
-		// initial setup, or try next channel.
+		// initial setup, or try next channel. 
 		//
 		case 0:	
-			channel= random (minChannel, maxChannel + 1);
+			channel= newChan (0);		// select a new channel
 			radio.setChannel (channel);
 			connectState= false;		// not connected
 			state= 1;
@@ -240,7 +249,7 @@ int SRFlock::flockToBase () {
 		//
 		case 1:
 			ackPacket ('@', true);		// request acknowledgement
-			T.setTimer (RADIOTIMER, random (5, 11));
+			T.setTimer (RADIOTIMER, 5);	// 
 			state= 2;			// await response
 			break;
 
@@ -248,7 +257,7 @@ int SRFlock::flockToBase () {
 		// pick another channel and try again.
 		//
 		case 2:	
-			if (getPacket (false)) {	// if a packet for us,
+			if (getPacket (false, false)) {	// if a packet for us,
 				blink (LEDLONG);	
 				state= 3;		// we're in sync
 				connectState= true;	// we are connected
@@ -260,17 +269,22 @@ int SRFlock::flockToBase () {
 		// (flagged by the return value, r) and honor any ack
 		// request.
 		// we have two RX timers; one for "time to request ack"
-		// and the other means time to renegotiate.
+		// and the other means no packet received; time to renegotiate
+		// the channel.
 		//
 		case 3:	
-			r= getPacket (true);	
+			r= getPacket (true, promisc);	
+			r= dupCheck (r);		// check if duplicate
 			if (r) {
-				r= dupCheck (r);	// check for duplicate packet
 				copyN (rxBuff, pxBuff, r);// deliver payload
-				if (pxBuff[2] == '!') ackPacket (pxBuff[1], false);
+				if ((pxBuff[0] == identity) &&
+				    (pxBuff[1] == '@') &&
+				  (pxBuff[2] == '!')) ackPacket (pxBuff[1], false);
 			}
+
 			// if quiet too long request acknowledgement from the base
-			// to ensure the channel is alive.
+			// to ensure that the channel is alive. getPacket()
+			// resets the timers if a valid packet is received.
 			//
 			if (rxTimeout && T.timer (RXTIMER)) ackPacket ('@', true);
 			if (rxTimeout && T.timer (RXTOTIMER)) state= 0;
@@ -282,9 +296,9 @@ int SRFlock::flockToBase () {
 // send an empty packet as acknowledgement (req == false) or 
 // include a single ! as payload (req == true). we up the ackBalance
 // counter whenever we request an acknowledge; this is decremented
-// upon receipt of any packet for us.
+// upon receipt of any packet from Base.
 //
-void SRFlock::ackPacket (char dest, boolean req) {
+void SRFlock::ackPacket (char dest, bool req) {
 
 	pxBuff[0]= dest;				// set destination
 	pxBuff[1]= identity;				// source: us
@@ -298,8 +312,7 @@ void SRFlock::ackPacket (char dest, boolean req) {
 }
 
 // look for a packet for us. reads any packet available, and checks
-// for address and general validity. at the moment we only accept
-// packets from the base.
+// for address and general validity. 
 //
 // the caller will check if acknowledgement needs to be sent, but 
 // to simplify that test, if the packet is short we zero the first
@@ -308,7 +321,7 @@ void SRFlock::ackPacket (char dest, boolean req) {
 // returns 0 is not a valid packet or not for us, else it returns
 // the packet length. hence, it returns 0, or 2..32.
 //
-int SRFlock::getPacket (boolean allOK) {
+int SRFlock::getPacket (bool broadcast, bool promisc) {
 
 	int r= radio.available();			// ready/sample RX power
 	if (r) {					// 0 else RX power
@@ -317,6 +330,7 @@ int SRFlock::getPacket (boolean allOK) {
 	}
 	if (r < 2) return 0;				// invalid length
 	blink (LEDBLIP);				// blip for valid packet
+	if (r < 3) pxBuff[2]= 0;			// see comment
 
 	// if we see *any* packet from the base, we assume that
 	// we are on the correct channel and that the channel is
@@ -324,26 +338,25 @@ int SRFlock::getPacket (boolean allOK) {
 	// are there conditions where this isn't a good assumption? i
 	// can't think of any.
 	//
-	if (pxBuff[1] != '@') return 0;			// only from: base
+	if (pxBuff[1] == '@') {				// if from the base,
+		random();				// break the sequence
+		T.resetTimer (RXTIMER);			// channel is alive
+		T.resetTimer (RXTOTIMER);
+	}
 
-	random();					// break the sequence
-	T.resetTimer (RXTIMER);				// channel is alive
-	T.resetTimer (RXTOTIMER);
-
-	// packets addressed to * are to all, eg. us.
+	// if it's to us, or accept broadcast is enabled, return the
+	// packet.
 	//
-	if (allOK && pxBuff[0] == '*') pxBuff[0]= identity;// to: * is to: us
+	if ((pxBuff[0] == identity) || (broadcast && (pxBuff[0] == '*'))) {
+		if (ackBalance) --ackBalance;		// downcount ack balance
+		blink (LEDBRIEF);
+		return r;
+	}
 
-	if (pxBuff[0] != identity) return 0;		// listen only to: us
-	blink (LEDBRIEF);				// got one
-	if (r < 3) pxBuff[2]= 0;			// see comment
-
-	// packet to us: down-count channel error counter, which is
-	// incremented upon every transmit that requests acknowledge.
+	// a valid packet, but not to us. we toss it unless 
+	// promiscuous.
 	//
-	if (ackBalance) --ackBalance;
-
-	return r;					// it's for us.
+	return promisc ? r : 0;
 }
 
 // see if the packet in pxBuff of length r is a duplicate. this CRCs
@@ -360,51 +373,12 @@ int SRFlock::getPacket (boolean allOK) {
 uint8_t SRFlock::dupCheck (uint8_t r) {
 
 	if (r < 3) return r;				// not long enough to check
-
-	int crc= crc8buff (pxBuff, r);			// CRC the packet
+	int crc= CRC.crc8buff (pxBuff, r);		// CRC the packet
 	if (crc == prevCRC) {				// if same as last time
-		r= (pxBuff[2] == '!' ? 3 : 2);		// include ! if present
+		r= ((pxBuff[2] == '!') ? 3 : 2);	// include ! if present
 	}
 	prevCRC= crc;
 	return r;
-}
-
-// generate the CRC8 of n bytes at pointer p. this is the
-// Dallas/Maxim CRC8 algorithm, below, looped.
-//
-uint8_t SRFlock::crc8buff (uint8_t * p, uint8_t n) {
-
-	uint8_t crc= 0;
-	while (n--) {
-		crc ^= *p++;
-		for (uint8_t i= 0; i < 8; i++) {
-			if (crc & 1) crc= (crc >> 1) ^ 0x8c;
-			else crc >>= 1;
-		}
-	}
-	return crc;
-}
-
-// from http://nongnu.org/avr-libc/user-manual/group__util__crc.html
-//
-// Optimized Dallas (now Maxim) iButton 8-bit CRC calculation.
-//
-// Polynomial: x^8 + x^5 + x^4 + 1 (0x8C)
-// Initial value: 0x0
-//
-// See http://www.maxim-ic.com/appnotes.cfm/appnote_number/27
-//
-// The following is the equivalent functionality written in C.
-//
-uint8_t SRFlock::crc8 (uint8_t crc, uint8_t data) {
-uint8_t i;
-
-  crc ^= data;
-  for (i = 0; i < 8; i++) {
-    if (crc & 0x01) crc= (crc >> 1) ^ 0x8C;
-    else crc >>= 1;
-  }
-  return crc;
 }
 
 // return flockToBase() status:
@@ -460,32 +434,30 @@ static uint8_t cstate = -1;
   this counting exceeds threshhold, we mark the channel as bad and pick
   a new one. 
 
-TODO: sent channel-change hint packet to *.
-
 */
-  
-  
 int SRFlock::baseToFlock () {
 
 	if (LEDpin) RFLED.LED();			// LED state machine
 
-	// if no packet, check the ack sent/received counter. if too
-	// many outstanding ack requests, change channels and do a broadcast
-	// ping.
-	//
 	int r= radio.available();			// ready/sample RX power
 	if (r) {					// 0 else RX power
 		rxPower= r;
 		r= radio.read (pxBuff, PACKETSIZE);	// read available packet
 	}
+
+	// if no valid packet, check the ack sent/received counter. if too
+	// many outstanding ack requests, change channels and do a broadcast
+	// ping.
+	//
 	if (r < 2) {					// if no packet,
 		if (ackBalance > chanThresh) { 
 			pxBuff[0]= '*';
 			pxBuff[1]= '@';
-			pxBuff[2]= '@';			// channel change hint 
+			pxBuff[2]= '-';			// channel change hint 
 			radio.write (pxBuff, 3);	// blind transmit
 			radio.write (pxBuff, 3);
 
+			connectState= false;		// fail
 			channel= newChan (channel);	// pick a new channel
 			radio.setChannel (channel);
 			T.trigTimer (RXTIMER);		// cause immediate ping
@@ -497,23 +469,29 @@ int SRFlock::baseToFlock () {
 	// got packet; blip the LED. if it's for us (base) then longer blink and
 	// extract payload, tally ack balance as channel quality.
 	//
-	blink (LEDBLIP);				// got a packet 
+	blink (LEDBLIP);				// brief blink
 	if (pxBuff[0] != identity) return 0;		// exit if not for us
 
-	blink (LEDBRIEF);				// BLINK
-	connectState= true;				// in some sense, anyway.
 	if (ackBalance) --ackBalance;			// good packet
-	if (r > 2 && pxBuff[2] == '!') {		// if it requests an ack
-		++ackBalance;				// flag that
-		ackPacket (pxBuff[1], false);
-	}
+	blink (LEDBRIEF);				// long blink
+	connectState= true;				// in some sense, anyway
 	r= dupCheck (r);				// see if duplicate
 	copyN (rxBuff, pxBuff, r);			// extract payload
+
+	// send an ack packet if one is requested, or if we go long enough
+	// without hearing a reply.
+	//
+	if (r > 2 && pxBuff[2] == '!') {		// if it requests an ack
+		ackPacket (pxBuff[1], false);		// ack it
+		++ackBalance;				// flag that
 
 	// broadcasting empty packets from base allows the birds to 
 	// avoid an ack request.
 	//
-	if (rxTimeout && T.timer (RXTIMER)) ackPacket ('*', false);
+	} else if (rxTimeout && T.timer (RXTIMER)) {
+		ackPacket ('*', false);
+	}
+
 	return r;					// tell caller what we got
 }
 
@@ -531,30 +509,36 @@ int SRFlock::write (uint8_t n) {
 
 	blink (LEDBRIEF);
 	copyN (pxBuff, txBuff, n);			// copy data in,
+
 	if (n < PACKETSIZE - 1) {			// if there is room
 		pxBuff[n++]= seqNumber;			// append sequence number
 		if (++seqNumber > '9') seqNumber= '0';
 		radio.write (pxBuff, n);		// additional write
 		delayMicroseconds (random (311, 1000));	// brief delay
 	}
-	if (n > 2 && txBuff[2] == '!') {
+
+	if (n > 2 && pxBuff[2] == '!') {
 		++ackBalance;				// require acknowledge
 	}
 	return radio.write (pxBuff, n);			// 
 }
 
-// mark the given channel as bad, select a new one, clear channel
-// statistics, and also randomly un-mark a bad channel as good. (inhale)
-// this tracks badness in a bitmap, one bit per channel, 0..127 
-// channels/0..127 bits.
-// 
-// channel 0 and 127 not actually used.
+// selects a new radio channel and returns it, within the channel limits
+// and dynamic channel selection. the specified channel, b, is marked as
+// bad. this also randomly (5% of the time) marks a random channel as
+// good, to both avoid running out of channels and to re-try channels
+// once marked bad (environment changes).
+//
+// channel state is a bit map; 0/1 good/bad.
 //
 uint8_t SRFlock::newChan (uint8_t b) {
 
-	// do nothing if not enabled.
-	//
-	if (! dynamicChannelMapping) return b;
+	if (! dynamicChannelMapping) return channel;
+
+	if (b != 0) {
+		Serial.print ("MAP BAD ");
+		Serial.println (b);
+	}
 
 	// mark this channel as bad.
 	//
@@ -574,7 +558,7 @@ uint8_t SRFlock::newChan (uint8_t b) {
 			badChan [r / 8] &= ~ (1 << (r % 8)); 
 		}
 
-	} while ((badChan [chan % 8] & (1 << chan % 8))); // loop while bad
+	} while ((badChan [chan % 8] & (1 << (chan % 8)))); // loop while bad
 
 	ackBalance= 0;
 	return chan;
@@ -592,9 +576,9 @@ void SRFlock::setRxAT (uint8_t sec) {
 void    SRFlock::setIdentity (char id) 	{ identity= id; }
 void    SRFlock::dynamicChannelEnable() { dynamicChannelMapping= true; };
 void    SRFlock::dynamicChannelDisable(){ dynamicChannelMapping= false; };
-void    SRFlock::nextChannel() 		{ radio.setChannel (channel= newChan (0)); }
+void    SRFlock::nextChannel() 		{ state= 0; radio.setChannel (channel= newChan (0)); }
 uint8_t SRFlock::getChannel() 		{ return channel; };
-boolean SRFlock::connected() 		{ return connectState; };
+bool SRFlock::connected() 		{ return connectState; };
 uint8_t SRFlock::getRxPower() 		{ return rxPower; };
 uint8_t SRFlock::getChanError() 	{ return ackBalance; };
 uint8_t * SRFlock::getChanErrorMap () 	{ return badChan; };
@@ -602,9 +586,11 @@ uint8_t SRFlock::getChanThresh()	{ return chanThresh; };
 void    SRFlock::setChanThresh(uint8_t t){ chanThresh= t; };
 void    SRFlock::setMinChannel (uint8_t ch) { if (ch >= MINCHANNEL) minChannel= ch; } 
 void    SRFlock::setMaxChannel (uint8_t ch) { if (ch <= MAXCHANNEL) maxChannel= ch; }
+void    SRFlock::setPromiscuous (bool f) { promisc= f; }
 
 // these are just pass-throughs to the radio object.
 //
+uint8_t SRFlock::readRegister (uint8_t r){ return radio.read_register (r); }
 void SRFlock::setDataRate (uint8_t n) 	{ radio.setDataRate (n); }
 void SRFlock::setPALevel (uint8_t n) 	{ radio.setPALevel (n); }
 void SRFlock::setChannel (uint8_t ch) 	{ radio.setChannel (channel= ch); }
@@ -628,28 +614,28 @@ void SRFlock::copyN (uint8_t * d, uint8_t * s, uint8_t n) {
 // return true if the command character c is ours, meaning we
 // processed it. return false if it's not ours.
 //
-boolean SRFlock::messageDispatcher (char c, unsigned nnn) {
+bool SRFlock::messageDispatcher (char c, unsigned nnn) {
   
-  boolean ok= true;
+  bool ok= true;
 
 	switch (c) {
-		case 'a': 					break;
+		case 'a':  					break;
 		case 'b': 					break; 
 		case 'c':					break;
 		case 'd':					break;
 		case 'e': 					break;   
-		case 'f': setChannel (nnn);			break;    // base only
-		case 'g': nextChannel();			break;    // base only
-		case 'h': setMinChannel (nnn);			break;    // base only
-		case 'i': setMaxChannel (nnn);			break;    // base only
-		case 'j': dynamicChannelEnable();		break;    // base only
-		case 'k': dynamicChannelDisable();		break;    // base only
-		case 'l': setDataRate (nnn);			break;    // base only
+		case 'f': setChannel (nnn);			break;
+		case 'g': nextChannel();			break;
+		case 'h': setMinChannel (nnn);			break;
+		case 'i': setMaxChannel (nnn);			break;
+		case 'j': dynamicChannelEnable();		break;
+		case 'k': dynamicChannelDisable();		break;
+		case 'l': setDataRate (nnn);			break;
 		case 'm': setPALevel (nnn);			break;
 		case 'n': setRxAR (nnn);			break; 
 		case 'o': setRxAT (nnn);			break;
 		case 'p': setChanThresh (nnn);			break;
-		case 'q':					break;
+		case 'q': setPromiscuous (nnn);			break;
 		case 'r':					break;
 		case 's': 					break;
 		case 't': 					break;
@@ -664,8 +650,6 @@ boolean SRFlock::messageDispatcher (char c, unsigned nnn) {
 	}
 	return ok;
 }
-
-
 
 // end of #ifndef __SRFLOCK_H__
 #endif

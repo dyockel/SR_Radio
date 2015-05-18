@@ -43,4 +43,5 @@ getChannel	KEYWORD2
 getRxPower	KEYWORD2
 getChanError	KEYWORD2
 getChanErrorMap	KEYWORD2
+setPromiscuous	KEYWORD2
 
