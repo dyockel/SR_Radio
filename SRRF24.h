@@ -110,7 +110,7 @@ public:
   void setARC (uint8_t n);
   void setChannel (uint8_t channel);
   void setAutoAck (bool enable);
-  void setDynamicPayloads (bool enable);
+  bool setDynamicPayloads (bool enable);
   int write (uint8_t * buf, uint8_t len);
   int available (void);
   int read( uint8_t * buf, uint8_t len );
@@ -124,6 +124,8 @@ public:
  * NSRRF24L01+ driver
  * tom jennings
  *
+ * 20 may 2015 added check for compatibility in setDynamicPayload
+ *             and begin.
  * 14 mar 2015 write() invokes available() upon completion.
  * 06 mar 2015 minor streamlining, during edits exploring
  *             workarounds to the PTX-to-PTX problem.
@@ -229,7 +231,10 @@ public:
 #include "nRF24L01.h"
 
 
-// bring up the radio, return 0 if OK.
+// bring up the radio, and sadly, check for bogus chips. there's a lot of bad
+// clones (!) of this inexpensive chip. i do not have a non-+ version to test, so
+// this may not catch that. i will catch, at least, the duds i got from
+// AliExpress. (all my good ones came from AliExpress too)
 //
 int SRRF24::begin (uint8_t _cepin, uint8_t _cspin) {
 
@@ -261,7 +266,7 @@ int SRRF24::begin (uint8_t _cepin, uint8_t _cspin) {
 	write_register (CONFIG, 0);			// chip may be in wacky state
 	delay (10);					// after a RESET
 	powerUp();
-	activateHiddenFeatures();			// "hid" dynamic payloads
+	activateHiddenFeatures();			// Nordic "hid" dynamic payloads?
 
 #define CONFIGBITTEST (_BV(EN_CRC)|_BV(CRCO))
 	setCRCLength ();				// if chip exists, set CRC...
@@ -274,9 +279,13 @@ int SRRF24::begin (uint8_t _cepin, uint8_t _cspin) {
 	setDataRate (1);				// 1MBPS bit rate
 	setChannel (80);				// quiet here in my lab, ymmv
 	setAutoAck (false);				// auto-acknowledge on
-	setDynamicPayloads (true);			// dynamic payloads on
 	setSelfAddress (DEFAULT_ADDRESS, 2, 3);		// self-address, default base
-	
+
+	// setDynamicPayloads(), when enabling, tests for the correct register
+	// value, to help detect bad counterfeits.
+	//
+	if (! setDynamicPayloads (true))  return 2;
+
 	flush_rx();
 	flush_tx();
 	write_register(STATUS, _BV(TX_DS) | _BV(MAX_RT) );
@@ -564,25 +573,42 @@ void SRRF24::setFixedAddress (uint64_t t, uint64_t r) {
 	selfAddress= false;
 }
 
-// enable/disable dynamic payloads (else fixed at 32 bytes) and
-// enable receive pipes.
+// enable/disable dynamic payloads (else packet size fixed at 32). if enabling,
+// this tests for the correct Nordic nRF24L01+ part, by ensuring the dynamic
+// stuff is actually enabled.
 //
-void SRRF24::setDynamicPayloads (bool enable) {
+// there is a counterfeit part that has some ACK bit inverted but this doesn't
+// test for that. i dont have one to test.
+//
+// this also always enables receive pipes P0 (the auto-ack rx pipe, even if
+// auto-ack not used) and P1, our main rx pipe.
+//
+bool SRRF24::setDynamicPayloads (bool enable) {
+
+bool r;
 
 	if (dynPayload= enable) {
 		write_register (FEATURE, read_register (FEATURE) | _BV(EN_DPL));
-		write_register (DYNPD, read_register (DYNPD) |  _BV(DPL_P1) | _BV(DPL_P0));
+		write_register (DYNPD, _BV(DPL_P1) | _BV(DPL_P0));
+
+		// now check that this actually worked, meaning this is actually
+		// a Nordic nRF24L01+ chip.
+		//
+		r= (read_register (DYNPD) ==  (_BV(DPL_P1) | _BV(DPL_P0))) &&
+		  ((read_register (FEATURE) & _BV(EN_DPL)) == _BV(EN_DPL));
 
 	} else {
 		write_register (FEATURE, read_register (FEATURE) & ~_BV(EN_DPL));
 		write_register (RX_PW_P0, 32);
 		write_register (RX_PW_P1, 32);
+		r= true;
 	}
 
 	// in any case, we enable pipes 0 and 1.
 	//
-	write_register (EN_RXADDR, read_register (EN_RXADDR) | 
-			_BV(ERX_P0) | _BV(ERX_P1));
+	write_register (EN_RXADDR, read_register (EN_RXADDR) | _BV(ERX_P0) | _BV(ERX_P1));
+
+	return r;
 }
 
 // Nordic "hid" the dynamic payload features. haven't researched why.
