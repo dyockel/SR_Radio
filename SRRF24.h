@@ -4,6 +4,7 @@
 
  tom jennings
 
+ 06 jun 2015 stray definition of PACKETSIZE deleted.
  05 may 2015 incorrectly cleared RX_DR status. now does so only
              after all RX FIFOs are cleared. (caused RX packets to
 	     "pileup" in the FIFO, symptom was hugely delayed
@@ -61,7 +62,7 @@ typedef uint16_t prog_uint16_t;
 
 // convert bit number to bit set in byte.
 //
-#define _BV(x) (1<<(x))
+//#define _BV(x) (1<<(x))
 
 // this is the default transceiver address, five bytes long.
 // bytes 4..1 are the base address; byte 0, the LS byte,
@@ -115,8 +116,6 @@ public:
   int available (void);
   int read( uint8_t * buf, uint8_t len );
   void powerDown (void);
-
-  const unsigned PACKETSIZE = 32;
 
 };
 

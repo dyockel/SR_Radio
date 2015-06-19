@@ -15,6 +15,8 @@
  TODO:
 
 
+  06 jun 2015  const int def's generate compiler complain?
+               changed to #defines
   17 may 2015  badChan[] table too small! moved xor() stuff
                into SRResources.
   10 may 2015  added setPromiscuous(). nasty bug -- ackPacket()
@@ -108,28 +110,26 @@ private:
 	uint8_t * rxBuff;			// rx buffer, in userland 
 	uint8_t pxBuff[PACKETSIZE];		// protocol packet buffer
 	bool connectState;			// true if connected
-	bool promisc;				// true if we'll receive any packet
+	bool promisc;				// true if receive any packet
 	unsigned rxTimeout;			// rx timeout time, decisec
 	uint8_t rxPower;			// receive power indication
 	bool dynamicChannelMapping;		// enables channel mapping
 	uint8_t ackBalance;			// channel error logic
 	uint8_t chanThresh;			//
 	uint8_t badChan[16];			// bad channels, 0..127, bitmap
-	uint8_t prevCRC;			// CRC8 of the previous payload packet
+	uint8_t prevCRC;			// CRC8 of previous payload 
 	char seqNumber;				// transmit packet sequence
 
 // timer stuff.
 //
-	const int RADIOTIMER = 0;		// various purposes 
-	const int RXTIMER =    1;		// rx timeout #1 anticipate
-	const int RXTOTIMER =  2;		// rx timeout #2 die
-	const int NUMTIMERS =  3;
-//
-	const int LEDBLIP =   40;
-	const int LEDBRIEF =  80;
-	const int LEDLONG =  700;
-
-	const int MAXRXTO =   60;		// longest RX timeout timer
+#define __FLOCKRADIOTIMER 0
+#define __FLOCK_RXTIMER 1
+#define __FLOCK_RXTOTIMER  2
+#define __FLOCK_NUMTIMERS  3
+#define __FLOCK_LEDBLIP  40
+#define __FLOCK_LEDBRIEF 80
+#define __FLOCK_LEDLONG (700)
+#define __FLOCK_MAXRXTO  60
 
 protected:
 	void blink (uint8_t n);
@@ -203,13 +203,13 @@ int SRFlock::begin (uint8_t _ce_pin, uint8_t _csn_pin, 	// radio chip pins
 	chanThresh= 10;					// outstanding ack limit
 	minChannel= MINCHANNEL;				// set default range
 	maxChannel= MAXCHANNEL;
-	channel= random (minChannel, maxChannel + 1);	// setup for baseToFlock()
+	channel= random (minChannel, maxChannel + 1);	// setup baseToFlock()
 	radio.setChannel (channel);
 	dynamicChannelMapping= true;			// on by default
 	prevCRC= 0;
 	seqNumber= '0';					// first packet sequence
 
-	T.begin (NUMTIMERS);
+	T.begin (__FLOCK_NUMTIMERS);
 	setRxAR (6);					// ack request interval
 	setRxAT (31);					// ack req fail interval
 
@@ -233,7 +233,7 @@ void SRFlock::blink (uint8_t n) { if (LEDpin) RFLED.blink (n); }
 int SRFlock::flockToBase () {
 
 	uint8_t r= 0;
-	if (LEDpin) RFLED.LED();			// run LEDs if configured
+	if (LEDpin) RFLED.LED();			// run LEDs 
 
 	switch (state) {
 		// initial setup, or try next channel. 
@@ -248,8 +248,8 @@ int SRFlock::flockToBase () {
 		// requesting acknowledgement. 
 		//
 		case 1:
-			ackPacket ('@', true);		// request acknowledgement
-			T.setTimer (RADIOTIMER, 5);	// 
+			ackPacket ('@', true);		// request ack
+			T.setTimer (__FLOCKRADIOTIMER, 5);
 			state= 2;			// await response
 			break;
 
@@ -258,11 +258,12 @@ int SRFlock::flockToBase () {
 		//
 		case 2:	
 			if (getPacket (false, false)) {	// if a packet for us,
-				blink (LEDLONG);	
+				unsigned x= __FLOCK_LEDLONG;
+				blink (x);		// why can't i cast that #def here?!
 				state= 3;		// we're in sync
 				connectState= true;	// we are connected
 
-			} else if (T.timer (RADIOTIMER)) state= 0;
+			} else if (T.timer (__FLOCKRADIOTIMER)) state= 0;
 			break;
 
 		// look for incoming packets, copy payload to the caller
@@ -279,15 +280,19 @@ int SRFlock::flockToBase () {
 				copyN (rxBuff, pxBuff, r);// deliver payload
 				if ((pxBuff[0] == identity) &&
 				    (pxBuff[1] == '@') &&
-				  (pxBuff[2] == '!')) ackPacket (pxBuff[1], false);
+				  (pxBuff[2] == '!')) {
+					ackPacket (pxBuff[1], false);
+				}
 			}
 
-			// if quiet too long request acknowledgement from the base
+			// if quiet too long request ack from the base
 			// to ensure that the channel is alive. getPacket()
 			// resets the timers if a valid packet is received.
 			//
-			if (rxTimeout && T.timer (RXTIMER)) ackPacket ('@', true);
-			if (rxTimeout && T.timer (RXTOTIMER)) state= 0;
+			if (rxTimeout && T.timer (__FLOCK_RXTIMER)) 
+				ackPacket ('@', true);
+			if (rxTimeout && T.timer (__FLOCK_RXTOTIMER)) 
+				state= 0;
 			break;
 	}
 	return r;
@@ -308,7 +313,7 @@ void SRFlock::ackPacket (char dest, bool req) {
 		++ackBalance;				// response required
 	}
 	radio.write (pxBuff, n);			// send packet
-	blink (LEDBLIP);				// blink LED
+	blink (__FLOCK_LEDBLIP);			// blink LED
 }
 
 // look for a packet for us. reads any packet available, and checks
@@ -329,7 +334,7 @@ int SRFlock::getPacket (bool broadcast, bool promisc) {
 		r= radio.read (pxBuff, PACKETSIZE);	// read available packet
 	}
 	if (r < 2) return 0;				// invalid length
-	blink (LEDBLIP);				// blip for valid packet
+	blink (__FLOCK_LEDBLIP);			// blip for valid packet
 	if (r < 3) pxBuff[2]= 0;			// see comment
 
 	// if we see *any* packet from the base, we assume that
@@ -340,8 +345,8 @@ int SRFlock::getPacket (bool broadcast, bool promisc) {
 	//
 	if (pxBuff[1] == '@') {				// if from the base,
 		random();				// break the sequence
-		T.resetTimer (RXTIMER);			// channel is alive
-		T.resetTimer (RXTOTIMER);
+		T.resetTimer (__FLOCK_RXTIMER);		// channel is alive
+		T.resetTimer (__FLOCK_RXTOTIMER);
 	}
 
 	// if it's to us, or accept broadcast is enabled, return the
@@ -349,7 +354,7 @@ int SRFlock::getPacket (bool broadcast, bool promisc) {
 	//
 	if ((pxBuff[0] == identity) || (broadcast && (pxBuff[0] == '*'))) {
 		if (ackBalance) --ackBalance;		// downcount ack balance
-		blink (LEDBRIEF);
+		blink (__FLOCK_LEDBRIEF);
 		return r;
 	}
 
@@ -460,20 +465,21 @@ int SRFlock::baseToFlock () {
 			connectState= false;		// fail
 			channel= newChan (channel);	// pick a new channel
 			radio.setChannel (channel);
-			T.trigTimer (RXTIMER);		// cause immediate ping
+			T.trigTimer (__FLOCK_RXTIMER);	// cause immediate ping
 		}
-		if (rxTimeout && T.timer (RXTIMER)) ackPacket ('*', true);
+		if (rxTimeout && T.timer (__FLOCK_RXTIMER)) 
+			ackPacket ('*', true);
 		return 0;				// 
 	}
 
 	// got packet; blip the LED. if it's for us (base) then longer blink and
 	// extract payload, tally ack balance as channel quality.
 	//
-	blink (LEDBLIP);				// brief blink
+	blink (__FLOCK_LEDBLIP);			// brief blink
 	if (pxBuff[0] != identity) return 0;		// exit if not for us
 
 	if (ackBalance) --ackBalance;			// good packet
-	blink (LEDBRIEF);				// long blink
+	blink (__FLOCK_LEDBRIEF);			// long blink
 	connectState= true;				// in some sense, anyway
 	r= dupCheck (r);				// see if duplicate
 	copyN (rxBuff, pxBuff, r);			// extract payload
@@ -488,11 +494,11 @@ int SRFlock::baseToFlock () {
 	// broadcasting empty packets from base allows the birds to 
 	// avoid an ack request.
 	//
-	} else if (rxTimeout && T.timer (RXTIMER)) {
+	} else if (rxTimeout && T.timer (__FLOCK_RXTIMER)) {
 		ackPacket ('*', false);
 	}
 
-	return r;					// tell caller what we got
+	return r;
 }
 
 // transmit a packet, return status.
@@ -507,11 +513,11 @@ int SRFlock::write (uint8_t n) {
 	random();					// interrupt sequence
 	if (! connectState) return -1;			// can't send now
 
-	blink (LEDBRIEF);
+	blink (__FLOCK_LEDBRIEF);
 	copyN (pxBuff, txBuff, n);			// copy data in,
 
 	if (n < PACKETSIZE - 1) {			// if there is room
-		pxBuff[n++]= seqNumber;			// append sequence number
+		pxBuff[n++]= seqNumber;			// append sequence num
 		if (++seqNumber > '9') seqNumber= '0';
 		radio.write (pxBuff, n);		// additional write
 		delayMicroseconds (random (311, 1000));	// brief delay
@@ -565,11 +571,13 @@ uint8_t SRFlock::newChan (uint8_t b) {
 }
 
 void SRFlock::setRxAR (uint8_t sec) { 
-	if (sec < MAXRXTO) T.setDeciTimer (RXTIMER, rxTimeout= sec * 10); 
+	if (sec < __FLOCK_MAXRXTO) 
+		T.setDeciTimer (__FLOCK_RXTIMER, rxTimeout= sec * 10); 
 };
 
 void SRFlock::setRxAT (uint8_t sec) { 
-	if (sec < MAXRXTO) T.setDeciTimer (RXTOTIMER, sec * 10); 
+	if (sec < __FLOCK_MAXRXTO) 
+		T.setDeciTimer (__FLOCK_RXTOTIMER, sec * 10); 
 };
 
 
