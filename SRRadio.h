@@ -9,5 +9,6 @@
 */
 
 #include "SRRF24.h"
-#include "SRFlock.h"
+#include "SRFlock1.h"
+#include "SRFlock2.h"
 

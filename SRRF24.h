@@ -4,6 +4,9 @@
 
  tom jennings
 
+ 07 aug 2015 fixed a couple of compiler warnings.
+ 28 jun 2015 correct or not, changed buffers from uint8_t's to chars
+             for read(), write(). too annoying casting all the time
  06 jun 2015 stray definition of PACKETSIZE deleted.
  05 may 2015 incorrectly cleared RX_DR status. now does so only
              after all RX FIFOs are cleared. (caused RX packets to
@@ -100,8 +103,11 @@ protected:
 
 public:
   int begin (uint8_t _cepin, uint8_t _cspin);
-  uint8_t read_register (uint8_t reg, uint8_t* buf, uint8_t len);
-  uint8_t read_register (uint8_t reg);
+  int write (char * buf, uint8_t len);
+  int available (void);
+  int read (char * buf, uint8_t len );
+  void powerDown (void);
+  
   void setFixedAddress (uint64_t t, uint64_t r);
   void setSelfAddress (uint64_t base, uint8_t t, uint8_t r);
   void setSelfAddress (uint8_t t, uint8_t r);
@@ -112,11 +118,9 @@ public:
   void setChannel (uint8_t channel);
   void setAutoAck (bool enable);
   bool setDynamicPayloads (bool enable);
-  int write (uint8_t * buf, uint8_t len);
-  int available (void);
-  int read( uint8_t * buf, uint8_t len );
-  void powerDown (void);
 
+  uint8_t read_register (uint8_t reg, uint8_t* buf, uint8_t len);
+  uint8_t read_register (uint8_t reg);
 };
 
 /*
@@ -240,7 +244,7 @@ int SRRF24::begin (uint8_t _cepin, uint8_t _cspin) {
 	ce_pin= _cepin;
 	csn_pin= _cspin;
 
-	pinMode (ce_pin, OUTPUT);			// CE pin, see nSRRF24L01
+	pinMode (ce_pin, OUTPUT);			// CE pin
 	pinMode (csn_pin, OUTPUT);			// SPI SS pin
 
 // FIXME: arduino-specific, and not friendly to other SPI devices.
@@ -258,32 +262,32 @@ int SRRF24::begin (uint8_t _cepin, uint8_t _cspin) {
 
 	ce(LOW);
 	csn(HIGH);
-	while (millis() < 200);				// needs 100 mS from power on
-	delay (10);					// paranoia
+//	while (millis() < 200);			// needs 100 mS from power on
+	delay (10);				// paranoia
 
-	powerDown();					// clean init
-	write_register (CONFIG, 0);			// chip may be in wacky state
-	delay (10);					// after a RESET
+	powerDown();				// clean init
+	write_register (CONFIG, 0);		// chip may be in wacky state
+	delay (10);				// after a RESET
 	powerUp();
-	activateHiddenFeatures();			// Nordic "hid" dynamic payloads?
+	activateHiddenFeatures();		// Nordic "hid" dynamic payloads?
 
 #define CONFIGBITTEST (_BV(EN_CRC)|_BV(CRCO))
-	setCRCLength ();				// if chip exists, set CRC...
-	if (read_register (CONFIG) & CONFIGBITTEST != CONFIGBITTEST)
-		return 1;				// couldn't set CRC?
+	setCRCLength ();			// if chip exists, set CRC...
+	if ((read_register (CONFIG) & CONFIGBITTEST) != CONFIGBITTEST)
+		return 1;			// couldn't set CRC?
 
-	setARD (1);					// 500 uS retransmission delay
-	setARC (8);					// 8 retransmission attempts
-	setPALevel (3);					// highest power output
-	setDataRate (1);				// 1MBPS bit rate
-	setChannel (80);				// quiet here in my lab, ymmv
-	setAutoAck (false);				// auto-acknowledge on
-	setSelfAddress (DEFAULT_ADDRESS, 2, 3);		// self-address, default base
+	setARD (1);				// 500 uS retransmission delay
+	setARC (8);				// 8 retransmission attempts
+	setPALevel (3);				// highest power output
+	setDataRate (1);			// 1MBPS bit rate
+	setChannel (80);			// quiet here in my lab, ymmv
+	setAutoAck (false);			// auto-acknowledge on
+	setSelfAddress (DEFAULT_ADDRESS, 2, 3);	// self-address, default base
 
 	// setDynamicPayloads(), when enabling, tests for the correct register
 	// value, to help detect bad counterfeits.
 	//
-	if (! setDynamicPayloads (true))  return 2;
+	if (! setDynamicPayloads (true)) return 2;
 
 	flush_rx();
 	flush_tx();
@@ -330,7 +334,7 @@ void SRRF24::powerUp (void) {
 //
 // this matches what Appendix A suggests.
 //
-int SRRF24::write (uint8_t * buf, uint8_t len) {
+int SRRF24::write (char * buf, uint8_t len) {
 
 	powerUp();					// boot the chip, if it's off
 	ce (LOW);					// stop the receiver
@@ -468,9 +472,7 @@ int SRRF24::available(void) {
 // it may take multiple calls to read() to empty the FIFOs
 // and clear RC status.
 //
-int SRRF24::read (uint8_t * buff, uint8_t len) {
-
-char *x= (char *)buff;
+int SRRF24::read (char * buff, uint8_t len) {
 
 	if (! available()) return 0;			// if no packet, bye bye
 
@@ -586,14 +588,15 @@ bool SRRF24::setDynamicPayloads (bool enable) {
 
 bool r;
 
-	if (dynPayload= enable) {
+	dynPayload= enable;
+	if (dynPayload) {
 		write_register (FEATURE, read_register (FEATURE) | _BV(EN_DPL));
 		write_register (DYNPD, _BV(DPL_P1) | _BV(DPL_P0));
 
 		// now check that this actually worked, meaning this is actually
 		// a Nordic nRF24L01+ chip.
 		//
-		r= (read_register (DYNPD) ==  (_BV(DPL_P1) | _BV(DPL_P0))) &&
+		r= (read_register (DYNPD) == (_BV(DPL_P1) | _BV(DPL_P0))) &&
 		  ((read_register (FEATURE) & _BV(EN_DPL)) == _BV(EN_DPL));
 
 	} else {

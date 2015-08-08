@@ -15,10 +15,12 @@ write	KEYWORD2
 available	KEYWORD2
 read	KEYWORD2
 powerDown	KEYWORD2
+powerUp	KEYWORD2
 
 SRFlock	KEYWORD1
 begin	KEYWORD2
 LED	KEYWORD2
+machine	KEYWORD2
 baseToFlock	KEYWORD2
 flockToBase	KEYWORD2
 flockToBaseState	KEYWORD2
@@ -44,4 +46,14 @@ getRxPower	KEYWORD2
 getChanError	KEYWORD2
 getChanErrorMap	KEYWORD2
 setPromiscuous	KEYWORD2
+setFlockLoopRate	KEYWORD2
+txMessages	KEYWORD2
+rxMessages	KEYWORD2
+setPeepConnectTime	KEYWORD2
+setPeepUpTime	KEYWORD2
+addDispatcher	KEYWORD2
+messageBegin	KEYWORD2
+messageTo	KEYWORD2
+messageAdd	KEYWORD2
+messageEnd	KEYWORD2
 
