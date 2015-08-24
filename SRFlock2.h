@@ -9,16 +9,21 @@
 #define __SRFLOCK2_H__
 
 
-// send an empty packet with optional protocol hint; ACK, HINT, BYE,
-// etc. if it requests an ack then we increase ack balance.
+// send an empty packet as acknowledgement (req == false) or 
+// include a single ! as payload (req == true). we up the ackBalance
+// counter whenever we request an acknowledge; this is decremented
+// upon receipt of any packet from Base.
 //
-void SRFlock::protoPacket (char dest, char req) {
+void SRFlock::ackPacket (char dest, bool req) {
 
 	pxBuff[0]= dest;				// set destination
 	pxBuff[1]= identity;				// source: us
-	pxBuff[2]= req;					// hint, or 0
-	if (req == __FLOCK_ACK) ++ackBalance;		// we expect a response
-	radio.write (pxBuff, (req ? 3 : 2));		// 2 if req is 0
+	uint8_t n= 2;					// packet length
+	if (req) {
+		pxBuff[n++]= '!';			// optional ack request
+		++ackBalance;				// response required
+	}
+	radio.write (pxBuff, n);			// send packet
 	blink (__FLOCK_LEDBLIP);			// blink LED
 }
 
@@ -49,7 +54,7 @@ int SRFlock::getPacket (bool broadcast, bool promisc) {
 	// are there conditions where this isn't a good assumption? i
 	// can't think of any.
 	//
-	if (pxBuff[1] == baseID) {			// if from the base,
+	if (pxBuff[1] == '@') {				// if from the base,
 		PRNG.xor16();				// break the sequence
 		T.resetTimer (__FLOCK_RXTIMER);		// channel is alive
 		T.resetTimer (__FLOCK_RXTOTIMER);
@@ -92,45 +97,7 @@ uint8_t SRFlock::dupCheck (uint8_t r) {
 	return r;
 }
 
-// mark this bird as heard from (set ACK flag) or
-// not heard from (eg. clear it's ACK flag).
-//
-void SRFlock::nakBird (char id) { 
-int b;
 
-	if (b= birdToBit (id) == -1) return;
-	birdAck [b / 8] &= 1 << (b % 8); 
-}
-
-void SRFlock::ackBird (char id) { 
-int b;
-
-	if (b= birdToBit (id) == -1) return;
-	birdAck [b / 8] &= 1 << (b % 8); 
-}
-
-// return trueif we've heard from this bird within ack time.
-//
-bool SRFlock::heardID (char id) {
-int b;
-
-	if (b= birdToBit (id) == -1) return false;
-	return birdAck [b / 8] & 1 << (b % 8); 
-}
-
-// turn bird ID in the range of A..Za..z to a number 0..51,
-// or -1 if out of that range.
-//
-int SRFlock::birdToBit (char id) {
-
-	int b= id - 'A'; if (b < 0) return -1;		// < A
-	if (b < 26) return b;				// A <= b <= Z
-
-	b= id - 'a'; if (b < 0) return -1;		// < a
-	return b < 26 ? b + 26 : -1;			// a <= b <= z else -1
-}
-
-//
 // selects a new radio channel and returns it, within the channel limits
 // and dynamic channel selection. the specified channel, b, is marked as
 // bad. this also randomly (5% of the time) marks a random channel as
@@ -195,10 +162,6 @@ void SRFlock::blink (uint8_t n) { if (LEDpin) RFLED.blink (n); }
 // "simple" support functions.
 //
 
-int	SRFlock::getPeepConnectTime()	{ return peepConnectTime; }
-int	SRFlock::getPeepUpTime()	{ return peepUpTime; }
-int	SRFlock::getRxAR() 	{ return T.getTimer (__FLOCK_RXTIMER) / 10; }
-int	SRFlock::getRxAT() 	{ return T.getTimer (__FLOCK_RXTOTIMER) / 10; }
 unsigned SRFlock::rxMessages () { return rxCount; }
 unsigned SRFlock::txMessages () { return txCount; }
 void	SRFlock::setPeepConnectTime (unsigned n) { peepConnectTime= n; }
@@ -212,10 +175,10 @@ void    SRFlock::nextChannel() 		{ radio.setChannel (channel= newChan (0)); }
 uint8_t SRFlock::getChannel() 		{ return channel; };
 bool SRFlock::connected() 		{ return connectState; };
 uint8_t SRFlock::getRxPower() 		{ return rxPower; };
-uint8_t SRFlock::getAckBalance() 	{ return ackBalance; };
+uint8_t SRFlock::getChanError() 	{ return ackBalance; };
 uint8_t * SRFlock::getChanErrorMap () 	{ return badChan; };
-uint8_t SRFlock::getAckThresh()		{ return ackThresh; };
-void    SRFlock::setAckThresh(uint8_t t){ ackThresh= t; };
+uint8_t SRFlock::getChanThresh()	{ return chanThresh; };
+void    SRFlock::setChanThresh(uint8_t t){ chanThresh= t; };
 void    SRFlock::setMinChannel (uint8_t ch) { if (ch >= MINCHANNEL) minChannel= ch; } 
 void    SRFlock::setMaxChannel (uint8_t ch) { if (ch <= MAXCHANNEL) maxChannel= ch; }
 void    SRFlock::setPromiscuous (bool f) { promisc= f; }
@@ -272,10 +235,15 @@ int SRFlock::messageAdd (char c, unsigned nnn) {
 	return PACKETSIZE - strlen (txQueue[in]);
 }
 
-// end the message, 
+// end the message, transmitting it. if the message has no payload, add
+// ack request. things may not go well if the message is not well-formed.
 //
 int SRFlock::messageEnd () {
 
+	if (txQueue[in][2] == '\0') {
+		txQueue[in][2]= '!';
+		txQueue[in][3]= '\0';
+	}
 	return write ();
 }
 

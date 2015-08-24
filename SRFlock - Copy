@@ -1,9 +1,7 @@
 /*
 
- flock protocol, part 1
+ flock protocol
  
- v5 added Peep, and added transmit queue to write(). 
-    
  v4 emphasis on messaging. added packet() and message()
     methods, API changes.
 
@@ -23,11 +21,6 @@
   
  TODO:
 
-
-  08 aug 2015	Peep working; moved transmit queue to write()
-  		completing missing functions. PROBLEM: the sequence
-		number is appended in write which is fine for Peep
-		and Flock but bad for packet(). 
 
   07 aug 2015  	beginning Peep dev. added powerUp() method
   		that powers the radio up and restarts
@@ -100,8 +93,8 @@
 */
 
 
-#ifndef __SRFLOCK1_H__
-#define __SRFLOCK1_H__
+#ifndef __SRFLOCK_H__
+#define __SRFLOCK_H__
 
 #if ARDUINO < 100
 #include <WProgram.h>
@@ -131,46 +124,34 @@ const int NRFCSNpin = 10;
 
 class SRFlock {
 
-// timers.
+	// timer stuff.
 //
 #define __FLOCKRADIOTIMER 0
 #define __FLOCK_RXTIMER 1
 #define __FLOCK_RXTOTIMER  2
-#define __FLOCK_PEEPTIMER  3
-#define __FLOCK_LOOPTIMER  4
-#define __FLOCK_NUMTIMERS  5
-
-// LED blink times
-//
+#define __FLOCK_NUMTIMERS  3
 #define __FLOCK_LEDBLIP  5
 #define __FLOCK_LEDBRIEF 10
 #define __FLOCK_LEDLONG (600)
-
 #define __FLOCK_MAXRXTO  60
-
-
-// transmit queue buffer depth
-//
-#define __FLOCK_TXQDEPTH 4
-
 
 public:
 	int begin ();
 	int begin (uint8_t cepin, uint8_t cspin);
 	void setIdentity (char id);
-	char getIdentity ();
+	unsigned char getIdentity ();
 	void LED (uint8_t pin);
 	int packet();
-	char peep();
 	char message();
 	bool connected();
 	int status();
+	int packetWrite (uint8_t n);
+	int packetWrite (char *p, uint8_t n);
 	int write ();
 	char * getRxBuff();
 	char * getTxBuff();
 
-
-// connection management
+// connection control
 //
 	void setRxAR (uint8_t sec);
 	void setRxAT (uint8_t sec);
@@ -182,16 +163,9 @@ public:
 	uint8_t getChanError();
 	uint8_t * getChanErrorMap ();
 	uint8_t getChanThresh();
-	int txQueueCount ();
-	int getTxQueueDepth ();
 	void powerDown ();
 	void powerUp ();
 	bool powerState();
-	void setPeepConnectTime (unsigned n);
-	void setPeepUpTime (unsigned n);
-	unsigned txMessages();
-	unsigned rxMessages();
-	void setFlockLoopRate (unsigned n);
 
 // radio pass-through functions
 //
@@ -228,10 +202,6 @@ protected:
 	uint8_t crc8 (uint8_t crc, uint8_t data);
 	uint8_t crc8buff (char * p, uint8_t n);
 
-	void txDequeue ();
-	int packetWrite (uint8_t n);
-	int packetWrite (int q, uint8_t n);
-
 private:
 	SRRF24 radio;				// radio chip driver
 	SRTimer T;				// software timers
@@ -243,23 +213,19 @@ private:
 
 	uint8_t cepin;
 	uint8_t csnpin;
-	byte flockRate;				// how fast Flock runs
 	char identity;				// our identity (A..Z)
 	uint8_t state;				// protocol state machine
 	uint8_t channel;			// current radio channel
 	uint8_t minChannel;			// the SMA radios lousy at
 	uint8_t maxChannel;			// low channels...
 	uint8_t cstate;				// connect-state report state
-	uint8_t pstate;				// power state report state
 
-	char txQueue [__FLOCK_TXQDEPTH] [PACKETSIZE + 1];// TX ring buffer
-	int in, out;				// input and output pointers
-
-	char pxBuff[PACKETSIZE + 1];		// protocol packet buffer
-	char rxBuff[PACKETSIZE];		// receive packet buffer
+	char * txBuff;				// tx buffer, in userland 
+	char * rxBuff;				// rx buffer, in userland 
+	char pxBuff[PACKETSIZE];		// protocol packet buffer
 	bool connectState;			// true if connected
 	bool promisc;				// true if receive any packet
-	bool poweroff;				// true if chip/protocol off
+	bool poweroff;				// true if chip powered off
 	unsigned rxTimeout;			// rx timeout time, decisec
 	uint8_t rxPower;			// receive power indication
 	bool dynamicChannelMapping;		// enables channel mapping
@@ -268,9 +234,7 @@ private:
 	uint8_t badChan[16];			// bad channels, 0..127, bitmap
 	uint8_t prevCRC;			// CRC8 of previous payload 
 	char seqNumber;				// packet sequence character
-	unsigned peepConnectTime;		// allowed time to connect
-	unsigned peepUpTime;			// stay up after write()
-	unsigned txCount, rxCount;		// packets sent/received
+
 };
 
 
@@ -289,22 +253,23 @@ int SRFlock::begin() {
 //
 int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 
-	in= 1; out= 0;
+	// the extra byte is so that we can null-terminate delivered
+	// packets without messing about.
+	//
+	rxBuff= new char [PACKETSIZE + 1];
+	txBuff= new char [PACKETSIZE + 1];
+
 	T.begin (__FLOCK_NUMTIMERS);			// init timers
 	MSG.begin();					// ready message parser
 	CRC.begin();					// probably does nothing
 	PRNG.begin();					// local PRNGs
 	LEDpin= 0;					// see LED() for begin()
 
-	setFlockLoopRate (3);				// flock loop time
 	state= 0;					// our state machine
 	connectState= false;				// no Flock connect
 	promisc= false;					// no promiscuous RX
 	poweroff= false;				// chip is ready
 	dynamicChannelMapping= true;			// on by default
-
-	peepConnectTime= 20000;				// 20 sec Peep connect
-	peepUpTime= 877;				// stay up after write()
 
 	int r= radio.begin (cepin, csnpin); 		// set up radio hardware
 	radio.setAutoAck (false);			// make sure this is off
@@ -319,7 +284,7 @@ int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 	seqNumber= '0';					// first packet sequence
 	setRxAR (6);					// ack request interval
 	setRxAT (31);					// ack req fail interval
-	cstate= pstate= 0;				// 
+	cstate= 255;
 	return r;
 }
 
@@ -333,36 +298,23 @@ void SRFlock::setIdentity (char id) {
 	state= identity == '@' ? 4 : 0;			// where to start
 }
 
-void SRFlock::setFlockLoopRate (unsigned n) {
 
-	if (n > 100) n= 100;
-	T.setTimer (__FLOCK_LOOPTIMER, n);
-}
-
-// power management methods used mainly by Peep protocol. 
-// after powerDown() is invoked, only powerUp(), powerState(), 
-// connectState() are allowed.
-//
-
-// power on the radio and reset Flock and Peep protocols.
+// power management methods. after powerDown() is invoked, only
+// powerUp(), powerState(), connectState() are allowed.
 //
 void SRFlock::powerUp () { 
 
 	connectState= false;				// not connected yet
-	pstate= cstate= 0;
-	in= 1; out= 0;					// TX queue cleared
-	rxCount= txCount= 0;
+	cstate= 0;					// stadystate= down
 	radio.available(); 				// ready the chip
 	setIdentity (identity);				// resets state machine
 	poweroff= false;
 }
 
-// power down the chip and mark everything as disconnected. this specifically
-// does not reset the TX queue so that it can be examined by txQueueCount().
-//
 void SRFlock::powerDown () { 	
 	
 	connectState= false;
+	cstate= 0;
 	setIdentity (identity);
 	radio.powerDown(); 
 	poweroff= true;
@@ -415,9 +367,7 @@ machine changes state accordingly.
 int SRFlock::packet () {
 
 	if (LEDpin) RFLED.LED();			// run LEDs 
-	if (! T.timer (__FLOCK_LOOPTIMER)) return 0;	// 
 
-	txDequeue();					// send queued packets
 	uint8_t r= 0;
 	switch (state) {
 
@@ -468,12 +418,12 @@ int SRFlock::packet () {
 			// for ack request and channel-change hint.
 			//
 			if (r) {
-				++rxCount;
 				copyN (rxBuff, pxBuff, r);// deliver payload
 				if (pxBuff[0] == identity) {
 					if (pxBuff[2] == '!') 
 						ackPacket (pxBuff[1], false);
 					if (pxBuff[2] == '-') {
+						Serial.println ("XXX hint");
 						state= 0;
 					}
 				}
@@ -491,6 +441,7 @@ int SRFlock::packet () {
 			//
 			if (rxTimeout && T.timer (__FLOCK_RXTOTIMER)) {
 				state= 0;
+				Serial.println ("XXX RXTO");
 			}
 			break;
 
@@ -576,159 +527,303 @@ int SRFlock::packet () {
 	return r;
 }
 
-// run the Peep protocol, which is mainly Flock with radio power
-// control that is write-driven.
+// send an empty packet as acknowledgement (req == false) or 
+// include a single ! as payload (req == true). we up the ackBalance
+// counter whenever we request an acknowledge; this is decremented
+// upon receipt of any packet from Base.
 //
-char SRFlock::peep() {
+void SRFlock::ackPacket (char dest, bool req) {
 
-	if (powerState() == 0) return 0;	// powered off
-
-	char c= message();			// run the protocol
-	if (T.timer (__FLOCK_PEEPTIMER)) {	// power off time has arrived
-		powerDown();
+	pxBuff[0]= dest;				// set destination
+	pxBuff[1]= identity;				// source: us
+	uint8_t n= 2;					// packet length
+	if (req) {
+		pxBuff[n++]= '!';			// optional ack request
+		++ackBalance;				// response required
 	}
-	return c;
+	radio.write (pxBuff, n);			// send packet
+	blink (__FLOCK_LEDBLIP);			// blink LED
 }
 
+// look for a packet for us. reads any packet available, and checks
+// for address and general validity. 
+//
+// the caller will check if acknowledgement needs to be sent, but 
+// to simplify that test, if the packet is short we zero the first
+// payload character so the caller doesn't need to check packet length.
+//
+// returns 0 is not a valid packet or not for us, else it returns
+// the packet length. hence, it returns 0, or 2..32.
+//
+int SRFlock::getPacket (bool broadcast, bool promisc) {
 
-// prepare a message for transmission. the message was
-// built in txBuff() which is the end (input) of the queue.
-// the Flock sequence character is appended (dup packet
-// detection at the receiver).
-//
-// if the radio is not powered on or not connected, the
-// packet remains queued for later transmission. 
-//
-// if the radio is off, it is powered on and readied.
-//
-// (the userland caller must check that there is room in 
-// the queue; not doing so merrily overwrites the oldest
-// unsent message, not an entirely unreasonable thing to do;
-// but if doing so advances the in pointer past the out
-// pointer re-sends of previously-sent packets will occur.
-// all this can be avoided by checking queue depth before
-// building a new packet getTxBuff().)
-//
-int SRFlock::write () {
+	int r= radio.available();			// ready/sample RX power
+	if (r) {					// 0 else RX power
+		rxPower= r;
+		r= radio.read (pxBuff, PACKETSIZE);	// read available packet
+	}
+	if (r < 2) return 0;				// invalid length
+	blink (__FLOCK_LEDBLIP);			// blip for valid packet
+	if (r < 3) pxBuff[2]= 0;			// see comment
 
-	// append the sequence character to the message payload.
+	// if we see *any* packet from the base, we assume that
+	// we are on the correct channel and that the channel is
+	// alive. but is this always true? if we can RX base, can base RX us?
+	// are there conditions where this isn't a good assumption? i
+	// can't think of any.
 	//
- 	int n= strlen (txQueue [in]);
-	if (n < PACKETSIZE - 1) {		// if there is room
-		txQueue [in] [n++]= seqNumber;	// append sequence num
-		if (++seqNumber > '9') seqNumber= '0';
+	if (pxBuff[1] == '@') {				// if from the base,
+		PRNG.xor16();				// break the sequence
+		T.resetTimer (__FLOCK_RXTIMER);		// channel is alive
+		T.resetTimer (__FLOCK_RXTOTIMER);
 	}
 
-	// if the radio is currently off, turn it on and leave this message
-	// queued for later transmission (since it can't happen now)
-	// and set Peep's connect-time timer (Flock ignores it).
+	// if it's to us, or accept broadcast is enabled, return the
+	// packet.
 	//
-	if (powerState() == 0) {		// if currently off,
-		powerUp();			// enable radio
-		T.setTimer (__FLOCK_PEEPTIMER, peepConnectTime); 
-		if (++in >= __FLOCK_TXQDEPTH) in= 0;	// enqueue this packet,
-		return 2;
+	if ((pxBuff[0] == identity) || (broadcast && (pxBuff[0] == '*'))) {
+		if (ackBalance) --ackBalance;		// downcount ack balance
+		blink (__FLOCK_LEDBRIEF);
+		return r;
 	}
 
-	// radio is up and Peep/Flock connected. write the packet
-	// directly. if this succeeds we're done; if it does not
-	// successfully send queue it up for later retry. Flock
-	// ignores PEEPTIMER.
+	// a valid packet, but not to us. we toss it unless 
+	// promiscuous.
 	//
-	if (connected() && txQueueCount() == 0) {
-		if (packetWrite (in, n)) {
-			T.setTimer (__FLOCK_PEEPTIMER, peepUpTime);
-			return 1;		// success
-		}
-	}
-	if (++in >= __FLOCK_TXQDEPTH) in= 0;	// enqueue this packet,
-
-	return 2;				// tx fail, leave queued
+	return promisc ? r : 0;
 }
 
-// write bytes from the buffer to the radio.
+// see if the packet in pxBuff of length r is a duplicate. this CRCs
+// packets of three or more bytes and compares it against the previous
+// CRC; if it's the same we call it a dup and trim it down to just the
+// addresses and possible ack request. 
 //
-int SRFlock::packetWrite (int q, uint8_t n) {
+// (the sender makes packets CRC uniquely by appending a sequence number;
+// this ensures that intentionally identical command strings in contiguous
+// packets won't be dropped.)
+//
+// this returns the corrected packet length.
+//
+uint8_t SRFlock::dupCheck (uint8_t r) {
 
-	PRNG.xor16();				// disrupt sequence
-	if (! connectState) return -1;		// can't send now
-
-	blink (__FLOCK_LEDBRIEF);
-	if (n > 2 && txQueue [q] [2] == '!') {
-		++ackBalance;			// require acknowledge
+	if (r < 3) return r;				// not long enough to check
+	int crc= CRC.crc8buff ((uint8_t *)pxBuff, r);	// CRC the packet
+	if (crc == prevCRC) {				// if same as last time
+		r= ((pxBuff[2] == '!') ? 3 : 2);	// include ! if present
 	}
-	int r= radio.write (txQueue [q], n);
-	if (r) ++txCount;
+	prevCRC= crc;
 	return r;
-
 }
-
-// if there is a message in the queue, copy it
-// into Flock's TX buffer and transmit it. if
-// transmission succeeds, dequeue the message.
-//
-void SRFlock::txDequeue () {
-
-	if (txQueueCount() && connected()) {
-		int o= out + 1; if (o >= __FLOCK_TXQDEPTH) o= 0; // the packet
-		int n= strlen (txQueue [o]);	// it's length
-		if (packetWrite (o, n)) {	// if success,
-			out= o;			// remove from queue
-			T.setTimer (__FLOCK_PEEPTIMER, peepUpTime);
- 
-		}
-	}
-}
-
-// return the number of items in the queue.
-//
-int SRFlock::txQueueCount () {
-
-	int a= in - out - 1; if (a < 0) a += __FLOCK_TXQDEPTH;
-	return a;
-}
-
-// return a pointer to the current TX buffer, eg. the oldest queue slot.
-//
-char * SRFlock::getTxBuff() {
-	
-	return txQueue[in];
-};
-
 
 // returns Flock connection status change. connected() returns current
-// state; this tracks changes. the code is a bit of a crock.
+// state; this tracks changes.
 //
 // 0:    was, is, disconnected
 // 1:    was discon, now connected
 // 2:    was connected, now disconnected
 // 3:    was, is, connected
-// 4:    radio was just powered up
-// 5:    radio was just powered down
 //
 //
 int SRFlock::status () {
 
-	// calc power state
-	//
-	pstate <<= 1;
-	if (! poweroff) pstate |= 1;
-	pstate &= 3;
-
-	// calculate connect state
-	//
 	cstate <<= 1;					// previous state 
 	if (connectState) cstate |= 1;			// new state 
 	cstate &= 3;					// this and last, only
-
-	// changes in power state override connect state.
-	switch (pstate) {
-		case 1: return 4; break;
-		case 2: return 5; break;
-		default: return cstate; break;
-	}
 	return cstate;
 }
 
+// transmit the contents of txBuff. if there is room, append the 
+// sequence number. in the SR command syntax, this appears as a
+// message payload without a command letter, and the command parser will 
+// ignore it; but it will make the CRC for this packet unique to 
+// this packet (and different from the CRC of otherwise identical 
+// commands, with a different sequence).
+//
+int SRFlock::write () {
+
+	int n= strlen (txBuff);				// payload length
+	if (n >= PACKETSIZE) {				// oops, shit!
+		strcpy (txBuff, "@@ UNTERMINATED!");
+		n= sizeof ("@@ UNTERMINATED!");
+	}
+	return packetWrite (txBuff, n);
+}
+
+// write N bytes from the transmit buffer.
+//
+int SRFlock::packetWrite (uint8_t n) {
+
+	return packetWrite (txBuff, n);
+}
+
+// write bytes from the buffer to the radio.
+//
+int SRFlock::packetWrite (char *s, uint8_t n) {
+
+	PRNG.xor16();					// interrupt sequence
+	if (! connectState) return -1;			// can't send now
+
+	blink (__FLOCK_LEDBRIEF);
+	copyN (pxBuff, txBuff, n);			// copy data in,
+
+	if (n < PACKETSIZE - 1) {			// if there is room
+		pxBuff[n++]= seqNumber;			// append sequence num
+		if (++seqNumber > '9') seqNumber= '0';
+		radio.write (pxBuff, n);		// additional write
+		delayMicroseconds (PRNG.random16 (311, 1000));	// brief delay
+	}
+
+	if (n > 2 && pxBuff[2] == '!') {
+		++ackBalance;				// require acknowledge
+	}
+	return radio.write (pxBuff, n);			// 
+}
+
+// selects a new radio channel and returns it, within the channel limits
+// and dynamic channel selection. the specified channel, b, is marked as
+// bad. this also randomly (5% of the time) marks a random channel as
+// good, to both avoid running out of channels and to re-try channels
+// once marked bad (environment changes).
+//
+// channel state is a bit map; 0/1 good/bad.
+//
+uint8_t SRFlock::newChan (uint8_t b) {
+
+	if (! dynamicChannelMapping) return channel;
+
+//	if (b != 0) {
+//		Serial.print ("MAP BAD ");
+//		Serial.println (b);
+//	}
+
+	// mark this channel as bad.
+	//
+	badChan [b / 8] |= 1 << (b % 8);		// mark bad,
+
+	// select a new, random, channel that is not currently
+	// marked as bad. also randomly (5% of the time) un-marks
+	// a channel; this prevents entirely running out of channels,
+	// and prevents inifnite looping, here. also, "bad" status
+	// varies with time since interference varies.
+	//
+	uint8_t chan, r;
+	do { 
+		chan= PRNG.random16 (minChannel, maxChannel + 1);
+		if (PRNG.random16 (1, 100) < 5) {	// 5% of the time,
+			r= PRNG.random16 (minChannel, maxChannel + 1);
+			badChan [r / 8] &= ~ (1 << (r % 8)); 
+		}
+
+	} while ((badChan [chan % 8] & (1 << (chan % 8)))); // loop while bad
+
+	ackBalance= 0;
+	return chan;
+}
+
+void SRFlock::setRxAR (uint8_t sec) { 
+	if (sec < __FLOCK_MAXRXTO) 
+		T.setDeciTimer (__FLOCK_RXTIMER, rxTimeout= sec * 10); 
+};
+
+void SRFlock::setRxAT (uint8_t sec) { 
+	if (sec < __FLOCK_MAXRXTO) 
+		T.setDeciTimer (__FLOCK_RXTOTIMER, sec * 10); 
+};
+
+
+// setup to use an LED for operational status.
+//
+void SRFlock::LED (uint8_t n) { RFLED.begin (LEDpin= n); }
+
+// if configured, blink the LED for N mS.
+//
+void SRFlock::blink (uint8_t n) { if (LEDpin) RFLED.blink (n); }
+
+
+// "simple" support functions.
+//
+
+unsigned char    SRFlock::getIdentity() {return identity;};
+char * SRFlock::getRxBuff() {return rxBuff;};
+char * SRFlock::getTxBuff() {return txBuff;};
+void    SRFlock::dynamicChannelEnable() { dynamicChannelMapping= true; };
+void    SRFlock::dynamicChannelDisable(){ dynamicChannelMapping= false; };
+void    SRFlock::nextChannel() 		{ radio.setChannel (channel= newChan (0)); }
+uint8_t SRFlock::getChannel() 		{ return channel; };
+bool SRFlock::connected() 		{ return connectState; };
+uint8_t SRFlock::getRxPower() 		{ return rxPower; };
+uint8_t SRFlock::getChanError() 	{ return ackBalance; };
+uint8_t * SRFlock::getChanErrorMap () 	{ return badChan; };
+uint8_t SRFlock::getChanThresh()	{ return chanThresh; };
+void    SRFlock::setChanThresh(uint8_t t){ chanThresh= t; };
+void    SRFlock::setMinChannel (uint8_t ch) { if (ch >= MINCHANNEL) minChannel= ch; } 
+void    SRFlock::setMaxChannel (uint8_t ch) { if (ch <= MAXCHANNEL) maxChannel= ch; }
+void    SRFlock::setPromiscuous (bool f) { promisc= f; }
+
+// pass-throughs to the radio object.
+//
+uint8_t SRFlock::readRegister (uint8_t r){ return radio.read_register (r); }
+void SRFlock::setDataRate (uint8_t n) 	{ radio.setDataRate (n); }
+void SRFlock::setPALevel (uint8_t n) 	{ radio.setPALevel (n); }
+void SRFlock::setChannel (uint8_t ch) 	{ radio.setChannel (channel= ch); }
+void SRFlock::setFixedAddress (uint64_t t, uint64_t r) 
+					{ radio.setFixedAddress (t, r); }
+void SRFlock::setSelfAddress (uint64_t base, uint8_t t, uint8_t r) 
+					{ radio.setSelfAddress (base, t, r); }
+void SRFlock::setSelfAddress (uint8_t t, uint8_t r) 
+					{ radio.setSelfAddress (t, r); }
+
+
+// local function: copy N bytes, from s to d.
+//
+void SRFlock::copyN (char * d, char * s, uint8_t n) {
+
+	if (n > PACKETSIZE) n= PACKETSIZE;		// don't be a jerk.
+	while (n--) *d++= *s++;
+}
+
+// add a parser, from userland, to the Flock radio system.
+//
+void SRFlock::addDispatcher (bool (* func) (int, unsigned)) {
+
+	MSG.addDispatcher (func);
+}
+
+// the messsage creation methods are a subset of the SRMessage
+// methods, and use local default values: txBuff, identity, etc.
+// end() is unique to Flock.
+//
+int SRFlock::messageBegin () {
+
+	MSG.messageBegin (txBuff, PACKETSIZE);
+	return PACKETSIZE;
+}
+
+int SRFlock::messageTo (char dest, boolean ack) {
+
+	MSG.messageChar (dest);		// to
+	MSG.messageChar (identity);	// from
+	if (ack) MSG.messageChar ('!');	// optional ack request
+}
+
+int SRFlock::messageAdd (char c, unsigned nnn) {
+
+	MSG.messageAdd (c, nnn);
+	return PACKETSIZE - strlen (txBuff);
+}
+
+// end the message, transmitting it. if the message has no payload, add
+// ack request. things may not go well if the message is not well-formed.
+//
+int SRFlock::messageEnd () {
+
+	if (txBuff[2] == '\0') {
+		txBuff[2]= '!';
+		txBuff[3]= '\0';
+	}
+	return write ();
+}
+
+// end of #ifndef __SRFLOCK_H__
 #endif
 

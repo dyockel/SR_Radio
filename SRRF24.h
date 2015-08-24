@@ -326,12 +326,6 @@ void SRRF24::powerUp (void) {
 // until completion (but not long). upon completion or error
 // we switch back to RX Mode immediately. 
 //
-// returns:
-//
-// > 0 number of tries it took to send (success)
-// 0   failed to send
-// < 0 hardware or code error
-//
 // if fixed payload, we always write 32 bytes, padding out the
 // packet if len < 32. if dynamic payload, then only
 // len bytes are sent.
