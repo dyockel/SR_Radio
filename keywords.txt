@@ -37,7 +37,7 @@ setMinChannel	KEYWORD2
 setMaxChannel	KEYWORD2
 setRxAR	KEYWORD2
 setRxAT	KEYWORD2
-setChanThresh	KEYWORD2
+setAckThresh	KEYWORD2
 connected	KEYWORD2
 dynamicChannelEnable	KEYWORD2
 dynamicChannelDisable	KEYWORD2
@@ -56,4 +56,9 @@ messageBegin	KEYWORD2
 messageTo	KEYWORD2
 messageAdd	KEYWORD2
 messageEnd	KEYWORD2
+getRxAR	KEYWORD2
+getRxAT	KEYWORD2
+getAckThresh	KEYWORD2
+getPeepConnectTime	KEYWORD2
+getPeepUpTime	KEYWORD2
 
