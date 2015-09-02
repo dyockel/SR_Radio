@@ -195,14 +195,14 @@ void SRFlock::blink (uint8_t n) { if (LEDpin) RFLED.blink (n); }
 // "simple" support functions.
 //
 
-int	SRFlock::getPeepConnectTime()	{ return peepConnectTime; }
-int	SRFlock::getPeepUpTime()	{ return peepUpTime; }
+int	SRFlock::getPeepConnectTime()	{ return peepConnectTime / 10; }
+int	SRFlock::getPeepUpTime()	{ return peepUpTime / 10; }
 int	SRFlock::getRxAR() 	{ return T.getTimer (__FLOCK_RXTIMER) / 10; }
 int	SRFlock::getRxAT() 	{ return T.getTimer (__FLOCK_RXTOTIMER) / 10; }
 unsigned SRFlock::rxMessages () { return rxCount; }
 unsigned SRFlock::txMessages () { return txCount; }
-void	SRFlock::setPeepConnectTime (unsigned n) { peepConnectTime= n; }
-void	SRFlock::setPeepUpTime (unsigned n) { peepUpTime= n; }
+void	SRFlock::setPeepConnectTime (unsigned n) { peepConnectTime= n * 10; }
+void	SRFlock::setPeepUpTime (unsigned n) { peepUpTime= n * 10; }
 char    SRFlock::getIdentity() {return identity;};
 char *	SRFlock::getRxBuff() {return rxBuff;};
 int	SRFlock::getTxQueueDepth() {return __FLOCK_TXQDEPTH;};

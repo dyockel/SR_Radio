@@ -51,7 +51,9 @@ supports per-bird queue check.
 
  have Peep try (N times?) the last-used channel before hunting.
 
-
+  02 sep 2015   setPeep* times are now deciseconds, not mS
+  26 aug 2015	oopsie, missing string terminator added after check
+  		character added to enqueued outging payload.
   24 aug 2015	added get*() for peep and ack stuff.
   11 aug 2015	stored a 0 after the last byte in received packet
   		for base (state 4) -- usage has been steadily towards
@@ -319,8 +321,8 @@ private:
 	uint8_t badChan[16];			// bad channels, 0..127, bitmap
 	uint8_t prevCRC;			// CRC8 of previous payload 
 	char seqNumber;				// packet sequence character
-	unsigned peepConnectTime;		// allowed time to connect
-	unsigned peepUpTime;			// stay up after write()
+	unsigned peepConnectTime;		// allowed time to connect, dS
+	unsigned peepUpTime;			// stay up after write(), dS
 	unsigned txCount, rxCount;		// packets sent/received
 };
 
@@ -355,8 +357,8 @@ int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 	dynamicChannelMapping= true;			// on by default
 	baseID= '@';					// default base ID
 
-	peepConnectTime= 20000;				// 20 sec Peep connect
-	peepUpTime= 877;				// stay up after write()
+	peepConnectTime= 200;				// 20 sec Peep connect
+	peepUpTime= 10;					// stay up after write()
 
 	int r= radio.begin (cepin, csnpin); 		// set up radio hardware
 	radio.setAutoAck (false);			// make sure this is off
@@ -676,6 +678,7 @@ int SRFlock::write () {
  	int n= strlen (txQueue [in]);
 	if (n < PACKETSIZE - 1) {		// if there is room
 		txQueue [in] [n++]= seqNumber;	// append sequence num
+		txQueue [in] [n]= '\0';		// terminate
 		if (++seqNumber > '9') seqNumber= '0';
 	}
 
@@ -688,7 +691,7 @@ int SRFlock::write () {
 	//
 	if (powerState() == 0) {		// if currently off,
 		powerUp();			// enable radio
-		T.setTimer (__FLOCK_PEEPTIMER, peepConnectTime); 
+		T.setDeciTimer (__FLOCK_PEEPTIMER, peepConnectTime); 
 		if (++in >= __FLOCK_TXQDEPTH) in= 0;	// enqueue this packet,
 
 //		Serial.print ("write ["); Serial.print (in);
@@ -707,7 +710,7 @@ int SRFlock::write () {
 //	Serial.print ("write ["); Serial.print (in);
 //	Serial.print ("] = ");Serial.println ("direct write success");
 
-			T.setTimer (__FLOCK_PEEPTIMER, peepUpTime);
+			T.setDeciTimer (__FLOCK_PEEPTIMER, peepUpTime);
 			return 1;		// success
 		}
 	}
@@ -732,7 +735,7 @@ void SRFlock::txDequeue () {
 	int n= strlen (txQueue [out]);		// payload length
 	if (packetWrite (out, n)) {		// if success,
 		if (++out >= __FLOCK_TXQDEPTH) out= 0;
-		T.setTimer (__FLOCK_PEEPTIMER, peepUpTime);
+		T.setDeciTimer (__FLOCK_PEEPTIMER, peepUpTime);
 
 //		Serial.print ("dequeue ["); Serial.print (out);
 //		Serial.print ("] = "); Serial.print (txQueue[out]); 
