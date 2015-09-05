@@ -10,86 +10,85 @@
 
 
 // send an empty packet with optional protocol hint; ACK, HINT, BYE,
-// etc. if it requests an ack then we increase ack balance.
+// etc. 
 //
 void SRFlock::protoPacket (char dest, char req) {
 
 	pxBuff[0]= dest;				// set destination
 	pxBuff[1]= identity;				// source: us
 	pxBuff[2]= req;					// hint, or 0
-	if (req == __FLOCK_ACK) ++ackBalance;		// we expect a response
 	radio.write (pxBuff, (req ? 3 : 2));		// 2 if req is 0
-	blink (__FLOCK_LEDBLIP);			// blink LED
+	blink (LEDBLIP);				// blink LED
 }
 
-// look for a packet for us. reads any packet available, and checks
-// for address and general validity. 
+// check for available receive packet and return the packet length
+// if one is available and matches address requirements. this also checks
+// for duplicate packets, and trims those down to the address header
+// (eg. no payload).
 //
-// the caller will check if acknowledgement needs to be sent, but 
-// to simplify that test, if the packet is short we zero the first
-// payload character so the caller doesn't need to check packet length.
+// loose if true means accept broadcast packets, otherwise
+// only packets addressed to us.
 //
-// returns 0 is not a valid packet or not for us, else it returns
+// to simplify ack-request checks this clears the third byte
+// (first payload byte) for packet lengths < 3 so that packet length
+// doesn't need to be checked.
+//
+// returns 0 if not a valid packet or not for us, else it returns
 // the packet length. hence, it returns 0, or 2..32.
 //
-int SRFlock::getPacket (bool broadcast, bool promisc) {
+int SRFlock::getPacket (bool loose) {
 
 	int r= radio.available();			// ready/sample RX power
 	if (r) {					// 0 else RX power
-		rxPower= r;
-		r= radio.read (pxBuff, PACKETSIZE);	// read available packet
+		rxPower= r;				// save for later return
+		pxBuff[2]= ' ';				// see comment
+		r= radio.read (pxBuff, PACKETSIZE);	// read packet
 	}
 	if (r < 2) return 0;				// invalid length
-	blink (__FLOCK_LEDBLIP);			// blip for valid packet
-	if (r < 3) pxBuff[2]= 0;			// see comment
 
-	// if we see *any* packet from the base, we assume that
-	// we are on the correct channel and that the channel is
-	// alive. but is this always true? if we can RX base, can base RX us?
-	// are there conditions where this isn't a good assumption? i
-	// can't think of any.
+	blink (LEDBLIP);				// blip for valid packet
+
+	// if it's not addressed to us, ignore it unless we're
+	// in promiscuous mode.
 	//
-	if (pxBuff[1] == baseID) {			// if from the base,
-		PRNG.xor16();				// break the sequence
-		T.resetTimer (__FLOCK_RXTIMER);		// channel is alive
-		T.resetTimer (__FLOCK_RXTOTIMER);
-	}
+	if (! toUs (loose)) return 0;
 
-	// if it's to us, or accept broadcast is enabled, return the
-	// packet.
+	blink (LEDBRIEF);				// for us, longer blink
+
+	// duplicate packets have their payloads truncated.
 	//
-	if ((pxBuff[0] == identity) || (broadcast && (pxBuff[0] == '*'))) {
-		if (ackBalance) --ackBalance;		// downcount ack balance
-		blink (__FLOCK_LEDBRIEF);
-		return r;
-	}
-
-	// a valid packet, but not to us. we toss it unless 
-	// promiscuous.
-	//
-	return promisc ? r : 0;
-}
-
-// see if the packet in pxBuff of length r is a duplicate. this CRCs
-// packets of three or more bytes and compares it against the previous
-// CRC; if it's the same we call it a dup and trim it down to just the
-// addresses and possible ack request. 
-//
-// (the sender makes packets CRC uniquely by appending a sequence number;
-// this ensures that intentionally identical command strings in contiguous
-// packets won't be dropped.)
-//
-// this returns the corrected packet length.
-//
-uint8_t SRFlock::dupCheck (uint8_t r) {
-
-	if (r < 3) return r;				// not long enough to check
 	int crc= CRC.crc8buff ((uint8_t *)pxBuff, r);	// CRC the packet
 	if (crc == prevCRC) {				// if same as last time
-		r= ((pxBuff[2] == '!') ? 3 : 2);	// include ! if present
+		r= ((pxBuff[2] == ACK) ? 3 : 2);	// include ! if present
 	}
-	prevCRC= crc;
+	prevCRC= crc;					// for next time
 	return r;
+}
+
+// return true if this packet contains an ACK request.
+//
+bool SRFlock::isAck () {
+
+	return (pxBuff[2] == ACK);
+}
+
+// return true if this packet is a channel-change hint.
+//
+bool SRFlock::isHint () {
+
+	if (identity == baseID) return false;		// not if we're base!	
+	if (pxBuff[1] != baseID) return false;		// only base issues
+	return pxBuff[2] == HINT;
+}
+
+// return true if the packet is addressed to us, or broadcast and
+// we're allowing those.
+//
+bool SRFlock::toUs (bool loose) {
+
+	if (pxBuff[0] == identity) return true;
+	if ((pxBuff[0] == ALL) && loose) return true;
+	return false;
 }
 
 // mark this bird as heard from (set ACK flag) or
@@ -172,16 +171,6 @@ uint8_t SRFlock::newChan (uint8_t b) {
 	return chan;
 }
 
-void SRFlock::setRxAR (uint8_t sec) { 
-	if (sec < __FLOCK_MAXRXTO) 
-		T.setDeciTimer (__FLOCK_RXTIMER, rxTimeout= sec * 10); 
-};
-
-void SRFlock::setRxAT (uint8_t sec) { 
-	if (sec < __FLOCK_MAXRXTO) 
-		T.setDeciTimer (__FLOCK_RXTOTIMER, sec * 10); 
-};
-
 
 // setup to use an LED for operational status.
 //
@@ -195,27 +184,36 @@ void SRFlock::blink (uint8_t n) { if (LEDpin) RFLED.blink (n); }
 // "simple" support functions.
 //
 
-int	SRFlock::getPeepConnectTime()	{ return peepConnectTime / 10; }
-int	SRFlock::getPeepUpTime()	{ return peepUpTime / 10; }
-int	SRFlock::getRxAR() 	{ return T.getTimer (__FLOCK_RXTIMER) / 10; }
-int	SRFlock::getRxAT() 	{ return T.getTimer (__FLOCK_RXTOTIMER) / 10; }
-unsigned SRFlock::rxMessages () { return rxCount; }
-unsigned SRFlock::txMessages () { return txCount; }
-void	SRFlock::setPeepConnectTime (unsigned n) { peepConnectTime= n * 10; }
-void	SRFlock::setPeepUpTime (unsigned n) { peepUpTime= n * 10; }
-char    SRFlock::getIdentity() {return identity;};
-char *	SRFlock::getRxBuff() {return rxBuff;};
-int	SRFlock::getTxQueueDepth() {return __FLOCK_TXQDEPTH;};
-void    SRFlock::dynamicChannelEnable() { dynamicChannelMapping= true; };
-void    SRFlock::dynamicChannelDisable(){ dynamicChannelMapping= false; };
-void    SRFlock::nextChannel() 		{ radio.setChannel (channel= newChan (0)); }
-uint8_t SRFlock::getChannel() 		{ return channel; };
-bool SRFlock::connected() 		{ return connectState; };
-uint8_t SRFlock::getRxPower() 		{ return rxPower; };
-uint8_t SRFlock::getAckBalance() 	{ return ackBalance; };
-uint8_t * SRFlock::getChanErrorMap () 	{ return badChan; };
+// Peep timers are deciseconds, stored as-is.
+//
+unsigned SRFlock::getPeepConnectTime()	{ return peepConnectTime; }
+unsigned SRFlock::getPeepUpTime()	{ return peepUpTime; }
+void	SRFlock::setPeepConnectTime (unsigned n) { peepConnectTime= n; }
+void	SRFlock::setPeepUpTime (unsigned n) { peepUpTime= n; }
+
+// AckRequest and AckTimeout are deciseconds.
+//
+void 	SRFlock::setRxAR (unsigned n) 	{ T.setDeciTimer (RXTIMER, n); };
+unsigned SRFlock::getRxAR() 		{ return T.getTimer (RXTIMER) / 100; }
+void 	SRFlock::setRxAT (unsigned n) 	{ T.setDeciTimer (RXTOTIMER, n); };
+unsigned SRFlock::getRxAT() 		{ return T.getTimer (RXTOTIMER) / 100; }
 uint8_t SRFlock::getAckThresh()		{ return ackThresh; };
-void    SRFlock::setAckThresh(uint8_t t){ ackThresh= t; };
+void    SRFlock::setAckThresh(uint8_t t) { ackThresh= t; };
+
+char    SRFlock::getIdentity() 		{ return identity; }
+bool 	SRFlock::connected() 		{ return state == 3; }
+unsigned SRFlock::rxMessages ()		{ return rxCount; }
+unsigned SRFlock::txMessages ()		{ return txCount; }
+char *	SRFlock::getRxBuff() 		{ return rxBuff; }
+unsigned SRFlock::getTxQueueDepth()	{ return TXQDEPTH; }
+uint8_t SRFlock::getRxPower() 		{ return rxPower; }
+uint8_t SRFlock::getAckBalance() 	{ return ackBalance; }
+uint8_t * SRFlock::getChanErrorMap () 	{ return badChan; }
+
+void    SRFlock::dynamicChannelEnable() { dynamicChannelMapping= true; }
+void    SRFlock::dynamicChannelDisable(){ dynamicChannelMapping= false; }
+uint8_t SRFlock::getChannel() 		{ return channel; }
+void    SRFlock::nextChannel() 		{ radio.setChannel (channel= newChan (0)); }
 void    SRFlock::setMinChannel (uint8_t ch) { if (ch >= MINCHANNEL) minChannel= ch; } 
 void    SRFlock::setMaxChannel (uint8_t ch) { if (ch <= MAXCHANNEL) maxChannel= ch; }
 void    SRFlock::setPromiscuous (bool f) { promisc= f; }
@@ -240,6 +238,7 @@ void SRFlock::copyN (char * d, char * s, uint8_t n) {
 
 	if (n > PACKETSIZE) n= PACKETSIZE;		// don't be a jerk.
 	while (n--) *d++= *s++;
+	*d= '\0';					// and terminate it
 }
 
 // add a parser, from userland, to the Flock radio system.

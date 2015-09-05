@@ -36,7 +36,6 @@ need a per-bird ACK list that tells how long since we've heard from bird.
 ackBird()/nakBird() may not work as-is.
 
 at write:
-
   if heard from bird recently, RF delivery.
   if not heard from bird, queue the message.
 
@@ -49,8 +48,12 @@ supports per-bird queue check.
 
 
 
- have Peep try (N times?) the last-used channel before hunting.
-
+  05 sep 2015	massive cleanup/minor rewrite. redundancy removed,
+  		(some of the) state errors fixed. RxAR, RxAT
+		rationalized and much clearer. now works as advertised.
+  04 sep 2015   aargh, converted all non-mS timers to deciseconds.
+  		RxAR and RxAT were seconds, not fine enough, and
+		also a bug returning value off by 10X.
   02 sep 2015   setPeep* times are now deciseconds, not mS
   26 aug 2015	oopsie, missing string terminator added after check
   		character added to enqueued outging payload.
@@ -139,6 +142,9 @@ supports per-bird queue check.
 #ifndef __SRFLOCK1_H__
 #define __SRFLOCK1_H__
 
+//#define DEBUG
+#undef DEBUG
+
 #if ARDUINO < 100
 #include <WProgram.h>
 #else
@@ -152,49 +158,46 @@ supports per-bird queue check.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-typedef uint16_t prog_uint16_t;
 #endif
 
-const uint8_t MINCHANNEL = 1;			// Nordic chip hardware limits
-const uint8_t MAXCHANNEL = 125;
-const uint8_t PACKETSIZE = 32;
+static const uint8_t MINCHANNEL = 1;			// Nordic chip hardware limits
+static const uint8_t MAXCHANNEL = 125;
+static const uint8_t PACKETSIZE = 32;
 
 // our customary radio pins.
 //
-const int NRFCEpin = 9;
-const int NRFCSNpin = 10;
+static const int NRFCEpin = 9;
+static const int NRFCSNpin = 10;
 
 
 class SRFlock {
 
 // timers.
 //
-#define __FLOCKRADIOTIMER 0
-#define __FLOCK_RXTIMER 1
-#define __FLOCK_RXTOTIMER  2
-#define __FLOCK_PEEPTIMER  3
-#define __FLOCK_LOOPTIMER  4
-#define __FLOCK_NUMTIMERS  5
+static const int RADIOTIMER = 0;
+static const int RXTIMER = 1;
+static const int RXTOTIMER  = 2;
+static const int PEEPTIMER  = 3;
+static const int LOOPTIMER  = 4;
+static const int NUMTIMERS  = 5;
 
 // LED blink times
 //
-#define __FLOCK_LEDBLIP  5
-#define __FLOCK_LEDBRIEF 10
-#define __FLOCK_LEDLONG (600)
+static const int LEDBLIP = 5;
+static const int LEDBRIEF = 10;
+static const int LEDLONG = 600;
 
-#define __FLOCK_MAXRXTO  60
-
-// packet types
+// packet stuff
 //
-#define __FLOCK_ACK '!'
-#define __FLOCK_HINT '-'
-#define __FLOCK_BYE '#'
+static const char ACK = '!';		// ack request
+static const char HINT = '-';		// channel-change hin
+static const char BYE = '#';		// 
+static const char ALL = '*';		// address: all birds
 
 
 // transmit queue buffer depth
 //
-#define __FLOCK_TXQDEPTH 4
-
+#define TXQDEPTH 4
 
 public:
 	int begin ();
@@ -215,8 +218,8 @@ public:
 
 // connection management
 //
-	void setRxAR (uint8_t sec);
-	void setRxAT (uint8_t sec);
+	void setRxAR (unsigned n);
+	void setRxAT (unsigned n);
 	void setAckThresh (uint8_t t);
 	void setPromiscuous(bool yup);
 	void dynamicChannelEnable();
@@ -225,20 +228,20 @@ public:
 	uint8_t getAckBalance();
 	uint8_t * getChanErrorMap ();
 	uint8_t getAckThresh();
-	int txQueueCount ();
-	int getTxQueueDepth ();
+	unsigned txQueueCount ();
+	unsigned getTxQueueDepth ();
 	void powerDown ();
 	void powerUp ();
-	bool powerState();
+	bool poweredOn ();
 	void setPeepConnectTime (unsigned n);
 	void setPeepUpTime (unsigned n);
 	unsigned txMessages();
 	unsigned rxMessages();
 	void setFlockLoopRate (unsigned n);
-	int getRxAR();
-	int getRxAT();
-	int getPeepConnectTime();
-	int getPeepUpTime();
+	unsigned getRxAR();
+	unsigned getRxAT();
+	unsigned getPeepConnectTime();
+	unsigned getPeepUpTime();
 
 // radio pass-through functions
 //
@@ -268,13 +271,13 @@ public:
 protected:
 	void blink (uint8_t n);
 	void protoPacket (char dest, char req);
-	int getPacket (bool broadcast, bool promisc);
+	int getPacket (bool loose);
 	void copyN (char * d, char * s, uint8_t n);
 	uint8_t newChan (uint8_t badChan);
-	uint8_t dupCheck (uint8_t r);
 	uint8_t crc8 (uint8_t crc, uint8_t data);
 	uint8_t crc8buff (char * p, uint8_t n);
 
+private:
 	void txDequeue ();
 	int packetWrite (uint8_t n);
 	int packetWrite (int q, uint8_t n);
@@ -282,8 +285,10 @@ protected:
 	void ackBird (char id);
 	void nakBird (char id);
 	int birdToBit (char id);
+	bool toUs (bool loose);
+	bool isAck ();
+	bool isHint ();
 
-private:
 	SRRF24 radio;				// radio chip driver
 	SRTimer T;				// software timers
 	SRCRC8 CRC;				// CRC for data packets
@@ -292,8 +297,6 @@ private:
 	SRMessage MSG;				// messaging system
 	uint8_t LEDpin;				// optional
 
-	uint8_t cepin;
-	uint8_t csnpin;
 	byte flockRate;				// how fast Flock runs
 	char identity;				// our identity (A..Z)
 	char baseID;				// ID of the base (usually @)
@@ -304,15 +307,13 @@ private:
 	uint8_t cstate;				// connect-state report state
 	uint8_t pstate;				// power state report state
 
-	char txQueue [__FLOCK_TXQDEPTH] [PACKETSIZE + 1];// TX ring buffer
+	char txQueue [TXQDEPTH] [PACKETSIZE + 1];// TX ring buffer
 	int in, out;				// input and output pointers
 
 	char pxBuff[PACKETSIZE + 1];		// protocol packet buffer
 	char rxBuff[PACKETSIZE + 1];		// receive packet buffer
-	bool connectState;			// true if connected
 	bool promisc;				// true if receive any packet
 	bool poweroff;				// true if chip/protocol off
-	unsigned rxTimeout;			// rx timeout time, decisec
 	uint8_t rxPower;			// receive power indication
 	bool dynamicChannelMapping;		// enables channel mapping
 	uint8_t ackBalance;			// outstanding ack count
@@ -343,7 +344,7 @@ int SRFlock::begin() {
 int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 
 	in= out= 0;
-	T.begin (__FLOCK_NUMTIMERS);			// init timers
+	T.begin (NUMTIMERS);				// init timers
 	MSG.begin();					// ready message parser
 	CRC.begin();					// probably does nothing
 	PRNG.begin();					// local PRNGs
@@ -351,7 +352,6 @@ int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 
 	setFlockLoopRate (3);				// flock loop time
 	state= 0;					// our state machine
-	connectState= false;				// no Flock connect
 	promisc= false;					// no promiscuous RX
 	poweroff= false;				// chip is ready
 	dynamicChannelMapping= true;			// on by default
@@ -366,13 +366,18 @@ int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 	PRNG.xor16Seed (micros());			// seed the 16 PRNG
 	channel= newChan (0);				// for baseToFlock()
 	radio.setChannel (channel);
-	ackThresh= 10;					// outstanding ack limit
 	minChannel= 20;					// set default range
 	maxChannel= 120;
 	prevCRC= 0;
 	seqNumber= '0';					// first packet sequence
-	setRxAR (6);					// ack request interval
-	setRxAT (31);					// ack req fail interval
+
+	// default assumes Flock: request ack every 4 seconds,
+	// connection timeout at 19 seconds. 5 lost acks means 
+	// bad channel/lost connect.
+	//
+	setRxAR (60);					// ack request interval
+	setRxAT (190);					// ack req fail interval
+	ackThresh= 5;					// outstanding ack limit
 	cstate= pstate= 0;				// 
 	return r;
 }
@@ -398,26 +403,22 @@ void SRFlock::setIdentity (char id) {
 void SRFlock::setFlockLoopRate (unsigned n) {
 
 	if (n > 100) n= 100;
-	T.setTimer (__FLOCK_LOOPTIMER, n);
+	T.setTimer (LOOPTIMER, n);
 }
 
 // power management methods used mainly by Peep protocol. 
-// after powerDown() is invoked, only powerUp(), powerState(), 
-// connectState() are allowed.
+// after powerDown() is invoked, only powerUp(), poweredOn()
+// are allowed.
 //
 
 // power on the radio and reset Flock and Peep protocols.
 //
 void SRFlock::powerUp () { 
 
-	connectState= false;				// not connected yet
-	pstate= cstate= 0;
-// changing indices here fouls up messages already
-// placed in the queue before power is turned on!
-// in= out= 0;					// TX queue cleared
-	rxCount= txCount= 0;
 	radio.available(); 				// ready the chip
+	rxCount= txCount= 0;				// quiescent
 	setIdentity (identity);				// resets state machine
+	pstate= cstate= 0;				// used by status()
 	poweroff= false;
 }
 
@@ -426,13 +427,12 @@ void SRFlock::powerUp () {
 //
 void SRFlock::powerDown () { 	
 	
-	connectState= false;
-	setIdentity (identity);
-	radio.powerDown(); 
+	setIdentity (identity);				// resets state machine
+	radio.powerDown(); 				// power off the chip
 	poweroff= true;
 }
 
-bool SRFlock::powerState () {
+bool SRFlock::poweredOn () {
 
 	return ! poweroff;
 }
@@ -462,6 +462,18 @@ int r;
 	return rxBuff[1];				// return sender
 }
 
+// run the Peep protocol, which is mainly Flock with radio power
+// control that is write-driven.
+//
+char SRFlock::peep() {
+
+	char c= message();			// run the protocol
+	if (T.timer (PEEPTIMER)) {		// power off time has arrived
+		powerDown();
+	}
+	return c;
+}
+
 /* this is the Flock packet machine, which handles both flock-to-base and
 base-to-flock. the state variable is initialized by setIdentity -- if @ then
 this runs baseToFlock and the state never changes.  the Flock-to-base state
@@ -478,29 +490,30 @@ machine changes state accordingly.
 
 int SRFlock::packet () {
 
+	if (! T.timer (LOOPTIMER)) return 0;		// 
 	if (LEDpin) RFLED.LED();			// run LEDs 
-	if (! T.timer (__FLOCK_LOOPTIMER)) return 0;	// 
-
 	txDequeue();					// send queued packets
+	if (! poweredOn()) return 0;			// we are powered off
+
 	uint8_t r= 0;
 	switch (state) {
 
-// FLOCK TO BASE -------------------------------------------------------------
+// FLOCK TO BASE NEGOTIATION ------------------------------------------------------
 //
 		// search for the operating channel by pinging random
 		// channels looking for a response from Base.
 		//
 		case 0:	
 			nextChannel();			// select a new channel
-			connectState= false;		// not connected
 			state= 1;
+			// FALL THROUGH
 
 		// blindly transmit an ack request, setup to wait
 		// for a response.
 		//
 		case 1:
-			protoPacket (baseID, __FLOCK_ACK);// request ack
-			T.setTimer (__FLOCKRADIOTIMER, 5);
+			protoPacket (baseID, ACK);	// request ack
+			T.setTimer (RADIOTIMER, 5);	// well tuned, but needs justification
 			state= 2;			// await response
 			break;
 
@@ -508,151 +521,131 @@ int SRFlock::packet () {
 		// current channel) or timeout (try next channel).
 		//
 		case 2:	
-			if (getPacket (false, false)) {	// if a packet for us,
-				unsigned x= __FLOCK_LEDLONG;
-				blink (x);
+			if (getPacket (false)) {	// if a packet for us,
+				blink (LEDLONG);
+				T.resetTimer (RXTIMER);	// reset ack timers
+				T.resetTimer (RXTOTIMER);
 				state= 3;		// we're in sync
-				connectState= true;	// we are connected
 
-			} else if (T.timer (__FLOCKRADIOTIMER)) {
+			} else if (T.timer (RADIOTIMER)) {
 				state= 0;
 			}
 			break;
 
-		// presumably "connected" which simply means we've communicated
-		// with the base within the alloted time. poll for incoming
-		// packets, respond to ack requests and channel-change hints,
-		// deal with timeout, deliver payload to userland.
+		
+		// channel established; we remain in this state as long as we
+		// receive or see a packet from the base within the alloted
+		// time(r)s. if we go too long without an rx packet, or 
+		// ack balance goes bad, we change channels and try again.
 		//
 		case 3:	
-			r= getPacket (true, promisc);	// what we got?
-			r= dupCheck (r);		// check if duplicate
-
-			// if a valid packet, deliver any payload. watch
-			// for ack request and channel-change hint.
-			//
+			r= getPacket (true);		// what we got?
 			if (r) {
+				// valid packet addressed to us. count it,
+				// reset timeout counters, deliver any
+				// payload, send acknowledgement if requested.
+				//
+				blink (LEDBLIP);
 				++rxCount;
-				copyN (rxBuff, pxBuff, r);// deliver payload
-				if (pxBuff[0] == identity) {
-					if (pxBuff[2] == '!') 
-						protoPacket (pxBuff[1], 0);
-					if (pxBuff[2] == '-') {
-						state= 0;
-					}
+				T.resetTimer (RXTIMER);	
+				T.resetTimer (RXTOTIMER);
+				copyN (rxBuff, pxBuff, r); // deliver
+
+				// honor ack requests now.
+				//
+				if (isAck()) {
+#if DEBUG
+					Serial.println ("honor ack req");
+#endif
+					protoPacket (pxBuff[1], 0);
+				}
+
+				// if this is a channel change hint, take
+				// the hint, but only if we're not the base!
+				//
+				if (isHint()) {
+#if DEBUG
+					Serial.println ("HINT recieved");
+#endif
+					setIdentity (identity);
+				}
+
+				// if addressed to us (as opposed to a broadcast)
+				// then this packet counts towards our ack
+				// balance (decreases outstanding balance).
+				//
+				if (toUs (false)) {
+					if (ackBalance) --ackBalance;	
+					blink (LEDBRIEF); // longer blink if ours
+
+				}
+				break;			// no need to run the rest
+			}
+
+			// handling of timeouts and ack balance is different,
+			// base vs. bird.
+			//
+			if (identity == baseID) {
+
+				// if we have too many outstanding ack requests
+				// and we are the base, then ditch this channel and
+				// try another.
+				//
+				if (ackBalance > ackThresh) { 
+#if DEBUG
+					Serial.println ("ackBalance fail");
+#endif
+					protoPacket ('*', HINT);
+					protoPacket ('*', HINT);
+					setIdentity (identity);	// start over
 				}
 			}
 
-			// if we go long enough without seeing a packet,
-			// request ack from the base. this timer is shorter
-			// than RXTOTIMER.
+			// for birds, if we go too long without hearing a
+			// packet from the base, request an ack packet.
+			// for base, this timer should be set longer than
+			// RxAT (RXOTIMER). for experimental purposes, if
+			// used by base it issues a broadcast ack request
+			// instead; possible utility as "see what birds are
+			// out there"?
 			//
-			if (rxTimeout && T.timer (__FLOCK_RXTIMER)) 
-				protoPacket (baseID, __FLOCK_ACK);
+			if (T.timer (RXTIMER)) {
+#if DEBUG
+				Serial.println ("rxtimer ack request to base");
+#endif
+				protoPacket (identity == baseID ? ALL : baseID, ACK);
+				++ackBalance;			// increase the balance
+			}
 
-			// if we never hear a response, restart protocol.
-			// this timer is longer than RXTIMER.
+			// birds and base: if we never hear a response, 
+			// restart protocol. this timer is longer than RXTIMER.
 			//
-			if (rxTimeout && T.timer (__FLOCK_RXTOTIMER)) {
-				state= 0;
+			if (T.timer (RXTOTIMER)) {
+#if DEBUG
+				Serial.println ("receive timeout");
+#endif
+				setIdentity (identity);	// start over
 			}
 			break;
 
-// BASE TO FLOCK -------------------------------------------------------------
+// BASE TO FLOCK NEGOTIATION -----------------------------------------------------
 //
-
-		// Base protocol all resides in one state. incoming
-		// packets get delivered and ack requests honored.
-		// "connect state" is loosely defined as pack success
-		// within the specified timeouts, and the number of
-		// outstanding ack requests below threshhold.
-		// 
+		// pick a new channel, clear the timers and
+		// await packets.
+		//
 		case 4:
-			r= radio.available();		// ready/sample RX power
-			if (r) {			// 0 else RX power
-				rxPower= r;
-				r= radio.read (pxBuff, PACKETSIZE);
-			}
-
-			// no-packet-received is when we check for timeouts
-			// and ack request/reply imbalance. if we reach a
-			// timeout, send a broadcast ack request. 
-			// if we accumulate too many outstanding requests, 
-			// issue a channel-change hint and change
-			// channels, forcing birds to re-search for the Base.
-			//
-			if (r < 2) {
-				// if we haven't seen a packet for a while,
-				// broadcast an ack request.
-				//
-				if (rxTimeout && T.timer (__FLOCK_RXTIMER)) 
-					protoPacket ('*', __FLOCK_ACK);
-
-				// check ack balance.
-				//
-				if (ackBalance > ackThresh) { 
-					protoPacket ('*', __FLOCK_HINT);
-					protoPacket ('*', __FLOCK_HINT);
-					nextChannel();
-					connectState= false;
-					T.trigTimer (__FLOCK_RXTIMER);
-				}
-				r= 0;			// setup return
-				break;
-			}
-
-			// brief blip upon receipt of any valid packet.
-			//
-			blink (__FLOCK_LEDBLIP);
-
-			// if the packet is for us, however, longer blink.
-			// if not for us, we're done here.
-			//
-			if (pxBuff[0] != identity) {
-				r= 0;
-				break;
-			}
-			blink (__FLOCK_LEDBRIEF);
-
-			// ack balance counts only packets addressed to us
-			// directly since that's how they are sent.
-			//
-			if (ackBalance) --ackBalance;	
-
-			// good packet, possibly contains payload. deliver
-			// payload if present and not a dup. null-terminate
-			// it in case it is a string!
-			//
-			connectState= true;	
-			r= dupCheck (r);
-			copyN (rxBuff, pxBuff, r);
-			rxBuff[r]= 0;
-
-			// honor ack requests.
-			//
-			if (r > 2 && pxBuff[2] == '!') {
-				protoPacket (pxBuff[1], 0);
-			}
+			nextChannel();
+#if DEBUG
+			Serial.print ("base channel "); Serial.println (channel);
+#endif
+			T.resetTimer (RXTIMER);		// bird, not base
+			T.resetTimer (RXTOTIMER);	// base and bird
+			ackBalance= 0;			// start over
+			state= 3;
 			break;
 	}
 	return r;
 }
-
-// run the Peep protocol, which is mainly Flock with radio power
-// control that is write-driven.
-//
-char SRFlock::peep() {
-
-	if (powerState() == 0) return 0;	// powered off
-
-	char c= message();			// run the protocol
-	if (T.timer (__FLOCK_PEEPTIMER)) {	// power off time has arrived
-		powerDown();
-	}
-	return c;
-}
-
-
 // prepare a message for transmission. the message was
 // built in txBuff() which is the end (input) of the queue.
 // the Flock sequence character is appended (dup packet
@@ -682,20 +675,14 @@ int SRFlock::write () {
 		if (++seqNumber > '9') seqNumber= '0';
 	}
 
-//	Serial.print ("write ["); Serial.print (in);
-//	Serial.print ("] = ");Serial.println (txQueue[in]);
-
 	// if the radio is currently off, turn it on and leave this message
 	// queued for later transmission (since it can't happen now)
 	// and set Peep's connect-time timer (Flock ignores it).
 	//
-	if (powerState() == 0) {		// if currently off,
+	if (! poweredOn()) {			// if currently off,
 		powerUp();			// enable radio
-		T.setDeciTimer (__FLOCK_PEEPTIMER, peepConnectTime); 
-		if (++in >= __FLOCK_TXQDEPTH) in= 0;	// enqueue this packet,
-
-//		Serial.print ("write ["); Serial.print (in);
-//		Serial.print ("] = ");Serial.println ("powerup queued");
+		T.setDeciTimer (PEEPTIMER, peepConnectTime); 
+		if (++in >= TXQDEPTH) in= 0;	// enqueue this packet,
 
 		return 2;
 	}
@@ -707,17 +694,11 @@ int SRFlock::write () {
 	//
 	if (connected() && txQueueCount() == 0) {
 		if (packetWrite (in, n) > 0) {
-//	Serial.print ("write ["); Serial.print (in);
-//	Serial.print ("] = ");Serial.println ("direct write success");
-
-			T.setDeciTimer (__FLOCK_PEEPTIMER, peepUpTime);
+			T.setDeciTimer (PEEPTIMER, peepUpTime);
 			return 1;		// success
 		}
 	}
-	if (++in >= __FLOCK_TXQDEPTH) in= 0;	// enqueue this packet,
-//	Serial.print ("write ["); Serial.print (in);
-//	Serial.print ("] = ");Serial.println ("direct write fail queued");
-
+	if (++in >= TXQDEPTH) in= 0;	// enqueue this packet,
 	return 2;				// tx fail, leave queued
 }
 
@@ -734,20 +715,16 @@ void SRFlock::txDequeue () {
 
 	int n= strlen (txQueue [out]);		// payload length
 	if (packetWrite (out, n)) {		// if success,
-		if (++out >= __FLOCK_TXQDEPTH) out= 0;
-		T.setDeciTimer (__FLOCK_PEEPTIMER, peepUpTime);
-
-//		Serial.print ("dequeue ["); Serial.print (out);
-//		Serial.print ("] = "); Serial.print (txQueue[out]); 
-//		Serial.println ( " success");
+		if (++out >= TXQDEPTH) out= 0;
+		T.setDeciTimer (PEEPTIMER, peepUpTime);
 	}
 }
 
 // return the number of items in the queue.
 //
-int SRFlock::txQueueCount () {
+unsigned SRFlock::txQueueCount () {
 
-	int a= in - out; if (a < 0) a += __FLOCK_TXQDEPTH;
+	int a= in - out; if (a < 0) a += TXQDEPTH;
 	return a;
 }
 
@@ -765,16 +742,12 @@ char * SRFlock::getTxBuff() {
 int SRFlock::packetWrite (int q, uint8_t n) {
 
 	PRNG.xor16();				// disrupt sequence
-	if (! connectState) return 0;		// can't send now
+	if (! connected()) return 0;		// can't send now
 
-	blink (__FLOCK_LEDBRIEF);
+	blink (LEDBRIEF);
 	if (n > 2 && txQueue [q] [2] == '!') {
 		++ackBalance;			// require acknowledge
 	}
-//	Serial.print ("packet write "); 
-//	Serial.print (n); Serial.print (" " );
-//	Serial.println (txQueue[q]);
-
 	int r= radio.write (txQueue [q], n);
 	if (r > 0) ++txCount;
 	return r;
@@ -804,7 +777,7 @@ int SRFlock::status () {
 	// calculate connect state
 	//
 	cstate <<= 1;					// previous state 
-	if (connectState) cstate |= 1;			// new state 
+	if (state == 3) cstate |= 1;			// new state 
 	cstate &= 3;					// this and last, only
 
 	// changes in power state override connect state.
