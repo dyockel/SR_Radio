@@ -46,8 +46,16 @@ dequeueing is then simply clearing [0] eg. empty slot.
 
 supports per-bird queue check.
 
-
-
+  
+  29 SEP 2015	added set/get protocol, folded peep() function
+  		into message(), eliminated the Radio "module" object.
+  16 sep 2015   reordered init code, slightly smaller but cleaner.
+  15 sep 2015	fixed annoying warning about truncated, had blink()
+  		arg declaration wrong. clear prevCRC on connect.
+  12 sep 2015	added required check for isFromBase() at state 2
+  		channel scan.
+		there is some bug in roadsterLCDDongle that is failing
+		RxAR/RxAT logic.
   05 sep 2015	massive cleanup/minor rewrite. redundancy removed,
   		(some of the) state errors fixed. RxAR, RxAT
 		rationalized and much clearer. now works as advertised.
@@ -142,7 +150,7 @@ supports per-bird queue check.
 #ifndef __SRFLOCK1_H__
 #define __SRFLOCK1_H__
 
-//#define DEBUG
+#define DEBUG 1
 #undef DEBUG
 
 #if ARDUINO < 100
@@ -160,7 +168,7 @@ supports per-bird queue check.
 #include <string.h>
 #endif
 
-static const uint8_t MINCHANNEL = 1;			// Nordic chip hardware limits
+static const uint8_t MINCHANNEL = 1;			// Nordic chip limits
 static const uint8_t MAXCHANNEL = 125;
 static const uint8_t PACKETSIZE = 32;
 
@@ -175,7 +183,7 @@ class SRFlock {
 // timers.
 //
 static const int RADIOTIMER = 0;
-static const int RXTIMER = 1;
+static const int RXTIMER =    1;
 static const int RXTOTIMER  = 2;
 static const int PEEPTIMER  = 3;
 static const int LOOPTIMER  = 4;
@@ -183,9 +191,9 @@ static const int NUMTIMERS  = 5;
 
 // LED blink times
 //
-static const int LEDBLIP = 5;
-static const int LEDBRIEF = 10;
-static const int LEDLONG = 600;
+static const unsigned LEDBLIP = 5;
+static const unsigned LEDBRIEF = 10;
+static const unsigned LEDLONG = 600;
 
 // packet stuff
 //
@@ -205,9 +213,10 @@ public:
 	void setBaseID (char id);
 	void setIdentity (char id);
 	char getIdentity ();
+	void setProtocol (int p);
+	int getProtocol ();
 	void LED (uint8_t pin);
 	int packet();
-	char peep();
 	char message();
 	bool connected();
 	int status();
@@ -269,7 +278,7 @@ public:
 	int messageEnd();
 
 protected:
-	void blink (uint8_t n);
+	void blink (unsigned n);
 	void protoPacket (char dest, char req);
 	int getPacket (bool loose);
 	void copyN (char * d, char * s, uint8_t n);
@@ -286,6 +295,7 @@ private:
 	void nakBird (char id);
 	int birdToBit (char id);
 	bool toUs (bool loose);
+	bool isFromBase ();
 	bool isAck ();
 	bool isHint ();
 
@@ -298,6 +308,7 @@ private:
 	uint8_t LEDpin;				// optional
 
 	byte flockRate;				// how fast Flock runs
+	byte protocol;				// 0=Flock 1=Peep
 	char identity;				// our identity (A..Z)
 	char baseID;				// ID of the base (usually @)
 	uint8_t state;				// protocol state machine
@@ -348,28 +359,16 @@ int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 	MSG.begin();					// ready message parser
 	CRC.begin();					// probably does nothing
 	PRNG.begin();					// local PRNGs
+	PRNG.xor16Seed (micros());			// seed the 16 PRNG
 	LEDpin= 0;					// see LED() for begin()
 
-	setFlockLoopRate (3);				// flock loop time
-	state= 0;					// our state machine
-	promisc= false;					// no promiscuous RX
-	poweroff= false;				// chip is ready
-	dynamicChannelMapping= true;			// on by default
-	baseID= '@';					// default base ID
-
-	peepConnectTime= 200;				// 20 sec Peep connect
-	peepUpTime= 10;					// stay up after write()
-
+	// intialize the radio. 
+	//
 	int r= radio.begin (cepin, csnpin); 		// set up radio hardware
-	radio.setAutoAck (false);			// make sure this is off
-	setPALevel (3);					// highest power 
-	PRNG.xor16Seed (micros());			// seed the 16 PRNG
-	channel= newChan (0);				// for baseToFlock()
-	radio.setChannel (channel);
+	dynamicChannelMapping= true;			// on by default
 	minChannel= 20;					// set default range
 	maxChannel= 120;
-	prevCRC= 0;
-	seqNumber= '0';					// first packet sequence
+	nextChannel();					// select first channel
 
 	// default assumes Flock: request ack every 4 seconds,
 	// connection timeout at 19 seconds. 5 lost acks means 
@@ -378,6 +377,19 @@ int SRFlock::begin (uint8_t cepin, uint8_t csnpin) {
 	setRxAR (60);					// ack request interval
 	setRxAT (190);					// ack req fail interval
 	ackThresh= 5;					// outstanding ack limit
+
+	radio.setAutoAck (false);			// make sure this is off
+	setPALevel (3);					// highest power 
+	setFlockLoopRate (3);				// flock loop time
+	promisc= false;					// no promiscuous RX
+	poweroff= false;				// chip is ready
+	peepConnectTime= 200;				// 20 sec Peep connect
+	peepUpTime= 10;					// stay up after write()
+	baseID= '@';					// default base ID
+
+	prevCRC= 0;
+	seqNumber= '0';					// first packet sequence
+	state= 0;					// our state machine
 	cstate= pstate= 0;				// 
 	return r;
 }
@@ -454,24 +466,18 @@ bool SRFlock::poweredOn () {
 char SRFlock::message () {
 int r;
 
-	r= packet();
-	if (r == 0) return '\0';			// no packet
-
-	rxBuff [r]= '\0';				// null terminate it
-	MSG.rxString (rxBuff + 2);			// dispatch messages
-	return rxBuff[1];				// return sender
-}
-
-// run the Peep protocol, which is mainly Flock with radio power
-// control that is write-driven.
-//
-char SRFlock::peep() {
-
-	char c= message();			// run the protocol
-	if (T.timer (PEEPTIMER)) {		// power off time has arrived
-		powerDown();
+	if (r= packet()) {			// if we got a packet,
+		rxBuff [r]= '\0';		// null terminate as string
+		MSG.rxString (rxBuff + 2);	// dispatch messages
 	}
-	return c;
+
+	// Peep is the same as Flock, except that it powers down
+	// when no transmit activity.
+	//
+	if (protocol == 1 && T.timer (PEEPTIMER)) {
+		powerDown();			// if Peep, manage power
+	}
+	return r ? rxBuff[1] : 0;		// return sender, if packet
 }
 
 /* this is the Flock packet machine, which handles both flock-to-base and
@@ -506,6 +512,7 @@ int SRFlock::packet () {
 		case 0:	
 			nextChannel();			// select a new channel
 			state= 1;
+			break;
 			// FALL THROUGH
 
 		// blindly transmit an ack request, setup to wait
@@ -513,7 +520,7 @@ int SRFlock::packet () {
 		//
 		case 1:
 			protoPacket (baseID, ACK);	// request ack
-			T.setTimer (RADIOTIMER, 5);	// well tuned, but needs justification
+			T.setTimer (RADIOTIMER, 15);	// well tuned, but needs justification
 			state= 2;			// await response
 			break;
 
@@ -521,10 +528,11 @@ int SRFlock::packet () {
 		// current channel) or timeout (try next channel).
 		//
 		case 2:	
-			if (getPacket (false)) {	// if a packet for us,
+			if (getPacket (false) && isFromBase()) {// if a packet for us,
 				blink (LEDLONG);
 				T.resetTimer (RXTIMER);	// reset ack timers
 				T.resetTimer (RXTOTIMER);
+				prevCRC= 0;		// tiny opp for bad...
 				state= 3;		// we're in sync
 
 			} else if (T.timer (RADIOTIMER)) {
@@ -545,7 +553,8 @@ int SRFlock::packet () {
 				// reset timeout counters, deliver any
 				// payload, send acknowledgement if requested.
 				//
-				blink (LEDBLIP);
+				if (ackBalance) --ackBalance;	
+				blink (LEDBRIEF); 
 				++rxCount;
 				T.resetTimer (RXTIMER);	
 				T.resetTimer (RXTOTIMER);
@@ -570,6 +579,13 @@ int SRFlock::packet () {
 					setIdentity (identity);
 				}
 
+/*
+ 
+   ackBalance has been creeping up; need to examine the state changes
+   that lead to incr/decr ackBalance. for now, decr at every packet we
+   deliver. likely overeager. this should all get revisited when we do 
+   per-address tx queue etc.
+
 				// if addressed to us (as opposed to a broadcast)
 				// then this packet counts towards our ack
 				// balance (decreases outstanding balance).
@@ -579,6 +595,7 @@ int SRFlock::packet () {
 					blink (LEDBRIEF); // longer blink if ours
 
 				}
+*/
 				break;			// no need to run the rest
 			}
 

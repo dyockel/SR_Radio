@@ -14,6 +14,13 @@
 //
 void SRFlock::protoPacket (char dest, char req) {
 
+#ifdef DEBUG
+	Serial.print ("protoPacket (");
+	Serial.write (dest);
+	Serial.write (identity);
+	Serial.write (req);
+	Serial.println (")");
+#endif
 	pxBuff[0]= dest;				// set destination
 	pxBuff[1]= identity;				// source: us
 	pxBuff[2]= req;					// hint, or 0
@@ -56,6 +63,8 @@ int SRFlock::getPacket (bool loose) {
 	blink (LEDBRIEF);				// for us, longer blink
 
 	// duplicate packets have their payloads truncated.
+	// though this is only meaningful when there is an actual
+	// payload to deliver, it's harmless if for short packets.
 	//
 	int crc= CRC.crc8buff ((uint8_t *)pxBuff, r);	// CRC the packet
 	if (crc == prevCRC) {				// if same as last time
@@ -89,6 +98,13 @@ bool SRFlock::toUs (bool loose) {
 	if (pxBuff[0] == identity) return true;
 	if ((pxBuff[0] == ALL) && loose) return true;
 	return false;
+}
+
+// return true if this packet is from our base.
+// 
+bool SRFlock::isFromBase () {
+
+	return (pxBuff[1] == baseID);
 }
 
 // mark this bird as heard from (set ACK flag) or
@@ -178,11 +194,16 @@ void SRFlock::LED (uint8_t n) { RFLED.begin (LEDpin= n); }
 
 // if configured, blink the LED for N mS.
 //
-void SRFlock::blink (uint8_t n) { if (LEDpin) RFLED.blink (n); }
-
+void SRFlock::blink (unsigned n) { if (LEDpin) RFLED.blink (n); }
 
 // "simple" support functions.
 //
+void    SRFlock::setMinChannel (uint8_t n) { if (n >= MINCHANNEL) minChannel= n; }
+void    SRFlock::setMaxChannel (uint8_t n) { if (n <= MAXCHANNEL) maxChannel= n; }
+void    SRFlock::nextChannel() { radio.setChannel (channel= newChan (0)); }
+void    SRFlock::dynamicChannelEnable() { dynamicChannelMapping= true; }
+void    SRFlock::dynamicChannelDisable(){ dynamicChannelMapping= false; }
+uint8_t SRFlock::getChannel() 		{ return channel; }
 
 // Peep timers are deciseconds, stored as-is.
 //
@@ -199,7 +220,10 @@ void 	SRFlock::setRxAT (unsigned n) 	{ T.setDeciTimer (RXTOTIMER, n); };
 unsigned SRFlock::getRxAT() 		{ return T.getTimer (RXTOTIMER) / 100; }
 uint8_t SRFlock::getAckThresh()		{ return ackThresh; };
 void    SRFlock::setAckThresh(uint8_t t) { ackThresh= t; };
+uint8_t SRFlock::getAckBalance() 	{ return ackBalance; }
 
+void    SRFlock::setProtocol (int p) 	{ protocol= p; }
+int     SRFlock::getProtocol () 	{ return protocol; }
 char    SRFlock::getIdentity() 		{ return identity; }
 bool 	SRFlock::connected() 		{ return state == 3; }
 unsigned SRFlock::rxMessages ()		{ return rxCount; }
@@ -207,15 +231,8 @@ unsigned SRFlock::txMessages ()		{ return txCount; }
 char *	SRFlock::getRxBuff() 		{ return rxBuff; }
 unsigned SRFlock::getTxQueueDepth()	{ return TXQDEPTH; }
 uint8_t SRFlock::getRxPower() 		{ return rxPower; }
-uint8_t SRFlock::getAckBalance() 	{ return ackBalance; }
 uint8_t * SRFlock::getChanErrorMap () 	{ return badChan; }
 
-void    SRFlock::dynamicChannelEnable() { dynamicChannelMapping= true; }
-void    SRFlock::dynamicChannelDisable(){ dynamicChannelMapping= false; }
-uint8_t SRFlock::getChannel() 		{ return channel; }
-void    SRFlock::nextChannel() 		{ radio.setChannel (channel= newChan (0)); }
-void    SRFlock::setMinChannel (uint8_t ch) { if (ch >= MINCHANNEL) minChannel= ch; } 
-void    SRFlock::setMaxChannel (uint8_t ch) { if (ch <= MAXCHANNEL) maxChannel= ch; }
 void    SRFlock::setPromiscuous (bool f) { promisc= f; }
 
 // pass-throughs to the radio object.
