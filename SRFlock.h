@@ -47,6 +47,7 @@ dequeueing is then simply clearing [0] eg. empty slot.
 supports per-bird queue check.
 
   
+  23 dec 2015	added setScanRate().
   05 nov 2015   dispatchers are now type void.
   03 nov 2015	removed addDispatcher level func.
   25 oct 2015	rationalized types and assignments, matches edits
@@ -158,8 +159,9 @@ supports per-bird queue check.
 #ifndef __SRFLOCK1_H__
 #define __SRFLOCK1_H__
 
-#define DEBUG 1
-#undef DEBUG
+//#define DEBUG
+//#define DEBUGRX
+//#define DEBUGTX
 
 #if ARDUINO < 100
 #include <WProgram.h>
@@ -237,6 +239,7 @@ public:
 
 /* connection management */
 
+	void setScanRate (unsigned n);
 	void setRxAR (unsigned n);
 	void setRxAT (unsigned n);
 	void setAckThresh (unsigned t);
@@ -316,6 +319,7 @@ private:
 	unsigned LEDpin;			/* optional */
 
 	unsigned flockRate;			/* how fast Flock runs */
+	unsigned scanRate;			/* how often state 0 scans */
 	unsigned protocol;			/* 0=Flock 1=Peep */
 	char identity;				/* our identity (A..Z) */
 	char baseID;				/* ID of the base (usually @) */
@@ -388,7 +392,7 @@ int SRFlock::begin (unsigned cepin, unsigned csnpin) {
 
 	radio.setAutoAck (false);			/* make sure this is off */
 	setPALevel (3);					/* highest power  */
-	setFlockLoopRate (3);				/* flock loop time */
+	setFlockLoopRate (5);				/* flock loop time */
 	promisc= false;					/* no promiscuous RX */
 	poweroff= false;				/* chip is ready */
 	peepConnectTime= 200;				/* 20 sec Peep connect */
@@ -399,6 +403,7 @@ int SRFlock::begin (unsigned cepin, unsigned csnpin) {
 	seqNumber= '0';					/* first packet sequence */
 	state= 0;					/* our state machine */
 	cstate= pstate= 0;				/*  */
+	scanRate= 5;					/* default channel scan rate */
 	return r;
 }
 
@@ -424,6 +429,13 @@ void SRFlock::setFlockLoopRate (unsigned n) {
 
 	if (n > 100) n= 100;
 	T.setTimer (LOOPTIMER, n);
+}
+
+/* set the state 0 channel scan rate. */
+
+void SRFlock::setScanRate (unsigned n) {
+
+	scanRate= n;
 }
 
 /* power management methods used mainly by Peep protocol.  */
@@ -503,13 +515,14 @@ machine changes state accordingly.
 */
 
 int SRFlock::packet () {
+byte r;
 
 	if (! T.timer (LOOPTIMER)) return 0;
 	if (LEDpin) RFLED.LED();			/* run LEDs  */
 	txDequeue();					/* send queued packets */
 	if (! poweredOn()) return 0;			/* we are powered off */
 
-	byte r= 0;
+	r= 0;
 	switch (state) {
 
 /* FLOCK TO BASE NEGOTIATION ------------------------------------------------------ */
@@ -528,7 +541,7 @@ int SRFlock::packet () {
 
 		case 1:
 			protoPacket (baseID, ACK);	/* request ack */
-			T.setTimer (RADIOTIMER, 15);	/* well tuned, but needs justification */
+			T.setTimer (RADIOTIMER, 3);	/* well tuned, but needs justification */
 			state= 2;			/* await response */
 			break;
 
@@ -557,6 +570,10 @@ int SRFlock::packet () {
 		case 3:	
 			r= getPacket (true);		/* what we got? */
 			if (r) {
+#ifdef DEBUGRX
+				Serial.print ("debug rx3 ");
+				Serial.println (pxBuff);
+#endif
 				/* valid packet addressed to us. count it, */
 				/* reset timeout counters, deliver any */
 				/* payload, send acknowledgement if requested. */
@@ -571,7 +588,7 @@ int SRFlock::packet () {
 				/* honor ack requests now. */
 
 				if (isAck()) {
-#if DEBUG
+#ifdef DEBUG
 					Serial.println ("honor ack req");
 #endif
 					protoPacket (pxBuff[1], 0);
@@ -581,8 +598,8 @@ int SRFlock::packet () {
 				/* the hint, but only if we're not the base! */
 
 				if (isHint()) {
-#if DEBUG
-					Serial.println ("HINT recieved");
+#ifdef DEBUG
+					Serial.println ("HINT received");
 #endif
 					setIdentity (identity);
 				}
@@ -617,7 +634,7 @@ int SRFlock::packet () {
 				/* try another. */
 
 				if (ackBalance > ackThresh) { 
-#if DEBUG
+#ifdef DEBUG
 					Serial.println ("ackBalance fail");
 #endif
 					protoPacket ('*', HINT);
@@ -635,7 +652,7 @@ int SRFlock::packet () {
 			/* out there"? */
 
 			if (T.timer (RXTIMER)) {
-#if DEBUG
+#ifdef DEBUG
 				Serial.println ("rxtimer ack request to base");
 #endif
 				protoPacket (identity == baseID ? ALL : baseID, ACK);
@@ -646,7 +663,7 @@ int SRFlock::packet () {
 			/* restart protocol. this timer is longer than RXTIMER. */
 
 			if (T.timer (RXTOTIMER)) {
-#if DEBUG
+#ifdef DEBUG
 				Serial.println ("receive timeout");
 #endif
 				setIdentity (identity);	/* start over */
@@ -660,8 +677,8 @@ int SRFlock::packet () {
 
 		case 4:
 			nextChannel();
-#if DEBUG
-			Serial.print ("base channel "); Serial.println (channel);
+#ifdef DEBUG
+			Serial.print ("new channel "); Serial.println (channel);
 #endif
 			T.resetTimer (RXTIMER);		/* bird, not base */
 			T.resetTimer (RXTOTIMER);	/* base and bird */
@@ -769,6 +786,10 @@ int SRFlock::packetWrite (int q, unsigned n) {
 	PRNG.xor16();				/* disrupt sequence */
 	if (! connected()) return 0;		/* can't send now */
 
+#ifdef DEBUGTX
+	Serial.print ("debug tx packetwrite ");
+	Serial.println ((char *)txQueue [q]);
+#endif
 	blink (LEDBRIEF);
 	if (n > 2 && txQueue [q] [2] == '!') {
 		++ackBalance;			/* require acknowledge */
@@ -819,7 +840,7 @@ int SRFlock::status () {
 
 void SRFlock::protoPacket (char dest, char req) {
 
-#ifdef DEBUG
+#ifdef DEBUGTX
 	Serial.print ("protoPacket (");
 	Serial.write (dest);
 	Serial.write (identity);

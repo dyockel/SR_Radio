@@ -4,6 +4,7 @@
 
  tom jennings
 
+ 07 dec 2015	minor simplification of begin() code.
  25 oct 2015	cleaned up sloppy assignments and source is heading towards
  		MISRA-C.
  07 aug 2015 fixed a couple of compiler warnings.
@@ -154,13 +155,6 @@ public:
  * it was the nicest rational basis i found for achieving 
  * my own ends.
  *
- * i intend this to be a very lean and mean, stripped
- * down but high-performance driver for highest possible
- * reliability. i removed a lot of what i saw as over-
- * generalization (eg. access to each and every possible
- * chip feature) and chose what i see as a solid basis
- * for more complex abstractions to be run over it.
- *
  * by default this driver uses Dynamic Payloads, and
  * therefore the non-PLUS version of the chip is not
  * supported. packet size can vary from 1 to the hardware
@@ -269,35 +263,37 @@ CLK:BUS 8Mhz:2Mhz, 16Mhz:4Mhz, or 20Mhz:5Mhz */
 
 	ce(LOW);
 	csn(HIGH);
-	delay (10);				/* paranoia */
-
-	powerDown();				/* clean init */
-	write_register (CONFIG, 0);		/* chip may be in wacky state */
-	delay (10);				/* after a RESET */
-	powerUp();
+	write_register_bits (CONFIG, _BV(PWR_UP)); // 
+	delayMicroseconds (1800);		/* 1.5mS until Standby-1 */
 	activateHiddenFeatures();		/* Nordic "hid" dynamic payloads? */
 
+	/* CRC is cleared by the CONFIG write above. now set it and
+	make sure it is set, to detect physical presence of chip. */
+
 #define CONFIGBITTEST (_BV(EN_CRC)|_BV(CRCO))
-	setCRCLength ();			/* if chip exists, set CRC... */
+	setCRCLength();				/* if chip exists, set CRC... */
 	if ((read_register (CONFIG) & CONFIGBITTEST) != CONFIGBITTEST)
 		return 1;			/* couldn't set CRC? */
 
+	/* auto-acknowledge must be disabled for rational protocols, but
+	set everything to reasonable defaults anyway. */
+
+	setAutoAck (false);			/* auto-acknowledge disabled */
 	setARD (1);				/* 500 uS retransmission delay */
 	setARC (8);				/* 8 retransmission attempts */
 	setPALevel (3);				/* highest power output */
 	setDataRate (1);			/* 1MBPS bit rate */
 	setChannel (80);			/* quiet here in my lab, ymmv */
-	setAutoAck (false);			/* auto-acknowledge on */
 	setSelfAddress (DEFAULT_ADDRESS, 2, 3);	/* self-address, default base */
 
-	/* setDynamicPayloads(), when enabling, tests for the correct register 
-	value, to help detect bad counterfeits. */
+	/* setDynamicPayloads() tests for the correct register value 
+	to detect bad counterfeits. */
 	
 	if (! setDynamicPayloads (true)) return 2;
 
 	flush_rx();
 	flush_tx();
-	write_register(STATUS, _BV(TX_DS) | _BV(MAX_RT) );
+	write_register (STATUS, _BV(TX_DS) | _BV(MAX_RT) );
 	ce (HIGH);
 
 	return 0;
@@ -458,7 +454,6 @@ else update it, return false. */
 /* no packet to read, so RPD is valid, save it for later return. */
 
 	recentRPD= read_register (RPD) ? 2 : 1;		/* 2 means hi rx power */
-/* 	recentRPD= read_register (RPD) + 1;		// update RPD */
 	return 0;					/* but not ready yet. */
 }
 
