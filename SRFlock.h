@@ -47,6 +47,7 @@ dequeueing is then simply clearing [0] eg. empty slot.
 supports per-bird queue check.
 
   
+  05 jan 2015	powerDown() now turns off LED.
   23 dec 2015	added setScanRate().
   05 nov 2015   dispatchers are now type void.
   03 nov 2015	removed addDispatcher level func.
@@ -462,6 +463,7 @@ void SRFlock::powerDown () {
 	setIdentity (identity);				/* resets state machine */
 	radio.powerDown(); 				/* power off the chip */
 	poweroff= true;
+	if (LEDpin) RFLED.off();			/* turn off LED  */
 }
 
 bool SRFlock::poweredOn () {
